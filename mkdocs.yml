@@ -1,0 +1,163 @@
+site_name: AlertSage
+site_description: >
+  Educational cybersecurity triage platform featuring LLM-enhanced dataset generation, 
+  uncertainty-aware classification, interactive Streamlit UI, and production monitoring tools 
+  for SOC automation research.
+site_url: https://texasbe2trill.github.io/AlertSage/
+repo_url: https://github.com/texasbe2trill/AlertSage
+repo_name: texasbe2trill/AlertSage
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2025 Chris Campbell
+
+theme:
+  name: material
+  logo: assets/alertsage-logo.svg
+  favicon: assets/alertsage-logo.svg
+  features:
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.sections
+    - navigation.expand
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - search.suggest
+    - search.highlight
+    - search.share
+    - toc.follow
+    - toc.integrate
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  language: en
+  font:
+    text: Roboto
+    code: Roboto Mono
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/texasbe2trill
+      name: GitHub Profile
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/
+      name: Python Package Index
+  analytics:
+    provider: google
+    property: !ENV GOOGLE_ANALYTICS_KEY
+  version:
+    provider: mike
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Anchor link to this section
+      toc_depth: 3
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+nav:
+  - Home:
+      - Overview: index.md
+      - Getting Started: getting-started.md
+      - Quick Start: quickstart.md
+      - Release Notes: release-notes.md
+  
+  - User Guide:
+      - CLI Usage: cli.md
+      - Streamlit UI: ui-guide.md
+      - Dataset Generation:
+          - Overview: data-and-generator.md
+          - Production Scripts: production-generation.md
+      - Configuration: configuration.md
+  
+  - Technical Deep Dive:
+      - Architecture: architecture.md
+      - Model Information: model-information.md
+      - Modeling & Evaluation: modeling-and-eval.md
+      - Notebooks Overview: notebooks.md
+      - LLM Integration: llm-integration.md
+  
+  - Development:
+      - Contributing: contributing.md
+      - Development Guide: development.md
+      - Testing: testing.md
+      - API Reference: api-reference.md
+  
+  - Reference:
+      - Limitations & Safety: limitations.md
+      - MITRE Attribution: mitre-attribution.md
+      - FAQ: faq.md
+      - Glossary: glossary.md

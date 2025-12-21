@@ -1,0 +1,12 @@
+[run]
+branch = True
+source = src/triage
+omit =
+    src/triage/cli.py
+    src/triage/database.py
+    src/triage/llm_client.py
+    src/triage/model.py
+
+[report]
+show_missing = True
+skip_covered = True

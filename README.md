@@ -1,7 +1,7 @@
 # 🛡️ AlertSage: NLP-Driven Incident Triage
 
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![NLP](https://img.shields.io/badge/NLP-Cybersecurity%20Triage-orange)
 ![Model](https://img.shields.io/badge/Model-Logistic%20Regression-green)
 ![Dataset](https://img.shields.io/badge/Data-Synthetic%20500k%20Incidents-purple)
@@ -136,37 +136,45 @@ An educational/research platform demonstrating intelligent cybersecurity inciden
 
 ## 🚀 Quick Start
 
-### Installation
+Get AlertSage running in 5 minutes.
 
+### Prerequisites
+- Python 3.11+ (`python --version`)
+- Git (`git --version`)
+
+### 1) Install
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/texasbe2trill/AlertSage.git
 cd AlertSage
 
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+# Create venv
+# macOS/Linux
+python3.11 -m venv .venv && source .venv/bin/activate
+# Windows
+# python -m venv .venv && .venv\Scripts\activate
 
-# Install with development dependencies
+# Install dev extras (editable)
 pip install -e ".[dev]"
 ```
 
-### Run the Streamlit UI
-
+### 2) Verify
 ```bash
-streamlit run ui.py
+# Run tests (first run auto-downloads model artifacts ~10 MB)
+pytest
+
+# Optional: coverage (readable report)
+pytest --cov=src/triage --cov-report=term-missing
 ```
 
-The interactive web interface provides:
+### 3) Use the UI
+```bash
+streamlit run ui_premium.py
+# If 8501 is busy:
+streamlit run ui_premium.py --server.port 8502
+```
 
-- 🎯 Single incident classification with visual confidence meters
-- 📊 Bulk CSV upload and analysis
-- 🤖 LLM second-opinion integration
-- 📈 Advanced analytics and threat intelligence briefs
-- 💾 Export results to CSV/JSON
-
-### Use the CLI
-
+### 4) Use the CLI
 ```bash
 # Basic classification
 nlp-triage "User reported suspicious email with attachment"
@@ -183,18 +191,20 @@ nlp-triage --llm-second-opinion \
 nlp-triage --difficulty soc-hard "Website experiencing slowdowns"
 ```
 
-### Generate Dataset
+### 5) Docs
+```bash
+mkdocs serve
+```
 
+### Dataset (Release Asset)
+- Canonical CSV is distributed as a compressed release asset: [GitHub Releases](https://github.com/texasbe2trill/AlertSage/releases).
+- Tests and notebooks auto-download artifacts on first run.
+- To generate locally:
 ```bash
 # Quick generation (1000 incidents)
 python generator/generate_cyber_incidents.py --n-events 1000
-
-# Production generation with monitoring
-./generator/launch_generator.sh 50000 my_dataset
-
-# Monitor progress in real-time
-./generator/monitor_generation.sh my_dataset --watch
 ```
+For larger runs and monitoring, see [docs/data-and-generator.md](docs/data-and-generator.md).
 
 ---
 
@@ -284,7 +294,7 @@ See [docs/production-generation.md](docs/production-generation.md) for comprehen
 
 ## 🎨 Streamlit UI Features
 
-The interactive web interface (`ui.py`) provides a comprehensive triage experience:
+The interactive web interface (`ui_premium.py`) provides a comprehensive triage experience:
 
 ### Single Incident Analysis
 
@@ -840,5 +850,6 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full text 
 - **Issues**: [GitHub Issues](https://github.com/texasbe2trill/AlertSage/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/texasbe2trill/AlertSage/discussions)
 - **Documentation**: [https://texasbe2trill.github.io/AlertSage/](https://texasbe2trill.github.io/AlertSage/)
+- **Security**: See [SECURITY.md](SECURITY.md) for reporting vulnerabilities
 
 **⭐ If you find this project useful, please consider giving it a star!**
