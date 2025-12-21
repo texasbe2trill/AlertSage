@@ -208,3 +208,12 @@ __marimo__/
 data/.DS_Store
 .DS_Store
 data/cyber_incidents_simulated.csv
+models/Meta-Llama-3.1-8B-Instruct-Q6_K.gguf
+models/test_embeddings.joblib
+models/train_embeddings.joblib
+models/X_test_combined.joblib
+models/X_train_combined.joblib
+models/X_test_tfidf.joblib
+models/X_train_tfidf.joblib
+models/y_test.joblib
+models/y_train.joblib
