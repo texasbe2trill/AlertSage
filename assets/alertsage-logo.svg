@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#5E5CE6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="shield-glow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Hexagonal shield outline -->
+  <g transform="translate(60, 60)">
+    <!-- Main shield shape -->
+    <path d="M 0,-40 L 34.64,-20 L 34.64,20 L 0,40 L -34.64,20 L -34.64,-20 Z" 
+          fill="url(#logo-gradient)" stroke="#764ba2" stroke-width="3" opacity="0.95"/>
+    
+    <!-- Inner hexagon with glow -->
+    <path d="M 0,-32 L 27.71,-16 L 27.71,16 L 0,32 L -27.71,16 L -27.71,-16 Z" 
+          fill="url(#shield-glow)" opacity="0.2"/>
+    
+    <!-- AI Circuit pattern -->
+    <!-- Center node -->
+    <circle cx="0" cy="0" r="6" fill="#FFFFFF" opacity="0.9"/>
+    
+    <!-- Top circuit nodes -->
+    <circle cx="0" cy="-18" r="4" fill="#FFFFFF" opacity="0.85"/>
+    <circle cx="-12" cy="-10" r="3.5" fill="#FFFFFF" opacity="0.8"/>
+    <circle cx="12" cy="-10" r="3.5" fill="#FFFFFF" opacity="0.8"/>
+    
+    <!-- Bottom circuit nodes -->
+    <circle cx="-12" cy="10" r="3.5" fill="#FFFFFF" opacity="0.8"/>
+    <circle cx="12" cy="10" r="3.5" fill="#FFFFFF" opacity="0.8"/>
+    <circle cx="0" cy="18" r="4" fill="#FFFFFF" opacity="0.85"/>
+    
+    <!-- Circuit connections -->
+    <line x1="0" y1="-6" x2="0" y2="-14" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    <line x1="-4" y1="-4" x2="-9" y2="-8" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    <line x1="4" y1="-4" x2="9" y2="-8" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    <line x1="-4" y1="4" x2="-9" y2="8" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    <line x1="4" y1="4" x2="9" y2="8" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    <line x1="0" y1="6" x2="0" y2="14" stroke="#FFFFFF" stroke-width="2" opacity="0.7"/>
+    
+    <!-- Data flow indicators (small dots) -->
+    <circle cx="-6" cy="-7" r="1.5" fill="#00f2fe" opacity="0.9">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="6" cy="-7" r="1.5" fill="#00f2fe" opacity="0.9">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="0.5s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="-6" cy="7" r="1.5" fill="#00f2fe" opacity="0.9">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="1s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="6" cy="7" r="1.5" fill="#00f2fe" opacity="0.9">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" begin="1.5s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+</svg>
