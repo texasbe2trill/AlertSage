@@ -1,10 +1,10 @@
 # 🛡️ AlertSage: NLP-Driven Incident Triage
 
-![Python Tests](https://github.com/texasbe2trill/AlertSage/actions/workflows/python-tests.yml/badge.svg)
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
+
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)
 ![NLP](https://img.shields.io/badge/NLP-Cybersecurity%20Triage-orange)
 ![Model](https://img.shields.io/badge/Model-Logistic%20Regression-green)
-![Dataset](https://img.shields.io/badge/Data-Synthetic%20100k%20Incidents-purple)
+![Dataset](https://img.shields.io/badge/Data-Synthetic%20500k%20Incidents-purple)
 ![Notebooks](https://img.shields.io/badge/Jupyter-Workflow-important)
 ![CLI](https://img.shields.io/badge/CLI-Incident%20Triage-lightgrey)
 ![LLM](https://img.shields.io/badge/LLM-Enhanced%20Generation-blueviolet)
@@ -50,7 +50,7 @@ An educational/research platform demonstrating intelligent cybersecurity inciden
 | 🚀 **Performance**      | Smart LLM Mode                | Two-pass optimization: 60-80% faster than full LLM analysis  |
 | ⚡ **GPU Acceleration** | Automatic GPU Detection       | Auto-enables Metal/CUDA/Vulkan for ~10x LLM speedup          |
 | 🤖 **LLM Integration**  | Local llama.cpp Models        | Privacy-first LLM for generation and second opinions         |
-| 📊 **Dataset**          | Synthetic SOC Corpus (100k)   | Realistic incidents with noise, typos, conflicting signals   |
+| 📊 **Dataset**          | Synthetic SOC Corpus (500k)   | Realistic incidents with noise, typos, conflicting signals   |
 | 🔄 **Rewrite Engine**   | LLM-Enhanced Generation       | Intelligent rewriting with sanitization & caching            |
 | 🛠️ **CLI Tools**        | nlp-triage Command            | Rich-formatted CLI with uncertainty logic and JSON modes     |
 | 📈 **Monitoring**       | Production Generation Scripts | Real-time progress, ETA, resource tracking, auto-refresh     |
