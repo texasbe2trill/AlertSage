@@ -1,6 +1,6 @@
 # 🛡️ AlertSage: NLP-Driven Incident Triage
 
-
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-brightgreen)](https://alertsage.streamlit.app/)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![NLP](https://img.shields.io/badge/NLP-Cybersecurity%20Triage-orange)
 ![Model](https://img.shields.io/badge/Model-Logistic%20Regression-green)
@@ -11,6 +11,13 @@
 ![UI](https://img.shields.io/badge/Streamlit-Interactive%20UI-red)
 
 An educational/research platform demonstrating intelligent cybersecurity incident triage through NLP. Features synthetic dataset generation with LLM enhancement, uncertainty-aware classification, interactive Streamlit UI, and production-grade monitoring tools for SOC automation research.
+
+## 🚀 Live Demo
+
+Try AlertSage in your browser:  
+👉 https://alertsage.streamlit.app/
+
+> The public demo uses hosted Hugging Face inference with usage limits. Local GGUF / llama.cpp support is available for developers.
 
 > **⚠️ Not production incident response tooling**  
 > This repo is for learning, experimentation, and portfolio use. It is not intended to run unsupervised in a live SOC.
