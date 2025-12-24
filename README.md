@@ -190,6 +190,19 @@ nlp-triage --llm-second-opinion \
 # High-difficulty mode for ambiguous cases
 nlp-triage --difficulty soc-hard "Website experiencing slowdowns"
 
+```
+
+### Hosted Hugging Face Inference (no local model)
+
+Prefer not to download a GGUF model? Use Hugging Face Inference instead:
+
+1. Export `HF_TOKEN` (or `TRIAGE_HF_TOKEN`) with your personal token.
+2. Optional: set `TRIAGE_HF_MODEL`/`HF_MODEL` (default `mistralai/Mistral-7B-Instruct-v0.3`).
+3. The CLI automatically routes LLM second-opinion calls to Hugging Face when a token is present—no local model required.
+4. In the Streamlit UI, enable **LLM Enhancement**, choose **Hugging Face Inference**, and supply your token in the sidebar. The UI enforces a 5-requests/60s session limit, an 8k-character input cap, and a 512 max-token generation limit per request.
+
+Tokens are never hardcoded; keep them in environment variables or a local secrets manager.
+
 ### LLM Model Setup (required for LLM features)
 
 LLM-assisted features use local llama.cpp models in GGUF format. Download a model and point the app to it:

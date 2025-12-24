@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from collections import Counter
+from typing import Any, Tuple
 import joblib
 
 # Import custom modules
@@ -125,6 +126,105 @@ def get_mitre_techniques(incident_type: str) -> list:
     return mitre_mapping.get(incident_type, [])
 
 
+# LLM request guardrails for the UI
+UI_LLM_MAX_INPUT_CHARS = 8000
+UI_LLM_MAX_TOKENS = 512
+HF_UI_MAX_REQUESTS = 5
+HF_UI_WINDOW_SECONDS = 60
+# Dark mode disabled for readability; keep light as single, consistent theme
+THEME_OPTIONS = ["Light"]
+
+
+def get_llm_settings() -> tuple[str, str, str | None]:
+    """Fetch LLM provider settings from session state with safe defaults."""
+    provider = st.session_state.get("llm_provider", "local")
+    hf_model = st.session_state.get(
+        "hf_model_id", "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    )
+    hf_token = st.session_state.get("selected_hf_token")
+    return provider, hf_model, hf_token
+
+
+def get_text_palette() -> dict[str, Any]:
+    """Return theme-aware text colors with stronger contrast."""
+    is_dark_mode = str(st.session_state.get("theme_mode", "Light")).lower() == "dark"
+    return {
+        "is_dark": is_dark_mode,
+        "secondary": "#e6edf7" if is_dark_mode else "#0f172a",
+        "muted": "#d5deeb" if is_dark_mode else "#1f2937",
+    }
+
+
+def apply_theme_mode_css(mode: str) -> None:
+    """Inject lightweight theme overrides for light/dark readability."""
+    if mode.lower() == "dark":
+        css = """
+        <style>
+        :root { color-scheme: dark; }
+        body, .stApp, [data-testid="stAppViewContainer"], .main { background: linear-gradient(180deg, #0b1220 0%, #0f172a 60%, #0b1220 100%) !important; color: #e5e7eb !important; }
+        .block-container { color: #e5e7eb !important; }
+        .glass-card { background: #111827 !important; color: #e5e7eb !important; border: 1px solid #1f2937 !important; }
+        .metric-premium { background: #111827 !important; color: #e5e7eb !important; border: 2px solid #1f2937 !important; }
+        .alert-premium { background: #0f172a !important; color: #e5e7eb !important; }
+        .alert-info { background: rgba(59, 130, 246, 0.15) !important; color: #bfdbfe !important; }
+        .alert-success { background: rgba(16, 185, 129, 0.2) !important; color: #a7f3d0 !important; }
+        .alert-warning { background: rgba(245, 158, 11, 0.2) !important; color: #fcd34d !important; }
+        .stMarkdown, .stText, .stSelectbox label, .stTextInput label, .stCheckbox label, .streamlit-expanderHeader { color: #e5e7eb !important; }
+        .stTextInput > div > div > input,
+        .stTextArea > div > div > textarea,
+        .stSelectbox > div > div > select { background: #0f172a !important; color: #e5e7eb !important; border: 1px solid #1f2937 !important; }
+        .section-header { color: #f8fafc !important; border-bottom: 3px solid #60a5fa !important; background: rgba(15, 23, 42, 0.75) !important; padding: 0.5rem 0; }
+        </style>
+        """
+    else:
+        css = """
+        <style>
+        :root { color-scheme: light; }
+        body, .stApp, [data-testid="stAppViewContainer"], .main { background: linear-gradient(180deg, #f7f9ff 0%, #eef2ff 55%, #e8f0ff 100%) !important; color: #0f172a !important; }
+        .block-container { color: #0f172a !important; }
+        .glass-card { background: #ffffff !important; color: #0f172a !important; border: 1px solid #e2e8f0 !important; }
+        .metric-premium { background: #ffffff !important; color: #0f172a !important; border: 2px solid #e2e8f0 !important; }
+        .alert-premium { background: #ffffff !important; color: #0f172a !important; }
+        .alert-info { background: #eff6ff !important; color: #1e40af !important; }
+        .alert-success { background: #d1fae5 !important; color: #065f46 !important; }
+        .alert-warning { background: #fef3c7 !important; color: #92400e !important; }
+        .stMarkdown, .stText, .stSelectbox label, .stTextInput label, .stCheckbox label, .streamlit-expanderHeader { color: #0f172a !important; }
+        .stTextInput > div > div > input,
+        .stTextArea > div > div > textarea,
+        .stSelectbox > div > div > select { background: #ffffff !important; color: #0f172a !important; border: 1px solid #e2e8f0 !important; }
+        .section-header { color: #0f172a !important; border-bottom: 3px solid #667eea !important; background: rgba(255, 255, 255, 0.85) !important; padding: 0.5rem 0; }
+        </style>
+        """
+
+    st.markdown(css, unsafe_allow_html=True)
+
+
+def validate_llm_input_length(text: str) -> tuple[bool, str]:
+    if text and len(text) > UI_LLM_MAX_INPUT_CHARS:
+        return False, (
+            f"LLM input too long ({len(text)} characters). "
+            f"Limit is {UI_LLM_MAX_INPUT_CHARS} characters."
+        )
+    return True, ""
+
+
+def hf_rate_limit_allowance() -> tuple[bool, float]:
+    timestamps = st.session_state.get("hf_ui_requests", [])
+    now = datetime.utcnow().timestamp()
+    window_start = now - HF_UI_WINDOW_SECONDS
+
+    timestamps = [ts for ts in timestamps if ts >= window_start]
+    st.session_state["hf_ui_requests"] = timestamps
+
+    if len(timestamps) >= HF_UI_MAX_REQUESTS:
+        retry_after = HF_UI_WINDOW_SECONDS - (now - timestamps[0])
+        return False, max(retry_after, 0.0)
+
+    timestamps.append(now)
+    st.session_state["hf_ui_requests"] = timestamps
+    return True, 0.0
+
+
 # ============================================================================
 # PREMIUM STYLING
 # ============================================================================
@@ -141,12 +241,14 @@ PREMIUM_CSS = """
 footer {visibility: hidden;}
 
 .main {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    color: #0f172a;
 }
 
 .block-container {
     padding: 2rem 3rem;
     max-width: 1600px;
+    color: #0f172a;
 }
 
 /* Plotly modebar positioning */
@@ -159,17 +261,18 @@ footer {visibility: hidden;}
 /* Dark Mode Support */
 @media (prefers-color-scheme: dark) {
     .main {
-        background: linear-gradient(135deg, #1a1f3a 0%, #2d1b3d 100%);
+        background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+        color: #e5e7eb;
     }
     
     .glass-card {
-        background: rgba(30, 35, 50, 0.95) !important;
-        border: 1px solid rgba(102, 126, 234, 0.3) !important;
+        background: rgba(26, 32, 44, 0.92) !important;
+        border: 1px solid rgba(148, 163, 184, 0.35) !important;
     }
     
     .metric-premium {
-        background: rgba(30, 35, 50, 0.8) !important;
-        border: 2px solid rgba(102, 126, 234, 0.3) !important;
+        background: rgba(26, 32, 44, 0.88) !important;
+        border: 2px solid rgba(148, 163, 184, 0.4) !important;
     }
     
     .alert-premium {
@@ -192,6 +295,10 @@ footer {visibility: hidden;}
     }
     
     .section-header {
+        color: #f8fafc !important;
+    }
+
+    .stMarkdown, .stText, .stSelectbox label, .stTextInput label, .stCheckbox label {
         color: #e5e7eb !important;
     }
 }
@@ -497,16 +604,18 @@ st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder to handle numpy arrays and datetime objects"""
 
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, (datetime, timedelta)):
-            return obj.isoformat()
-        return super().default(obj)
+    def default(self, o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, datetime):
+            return o.isoformat()
+        if isinstance(o, timedelta):
+            return o.total_seconds()
+        return super().default(o)
 
 
 # ============================================================================
@@ -1002,7 +1111,7 @@ def create_confidence_heatmap(data: list) -> go.Figure:
         data: Either probs_sorted (single incident) or batch results
     """
     if not data:
-        return None
+        return go.Figure()
 
     # Check data format and extract labels/values accordingly
     if "class" in data[0]:
@@ -1141,7 +1250,7 @@ def _get_corpus_embeddings(corpus_hash: str, corpus_texts: list) -> np.ndarray:
     return embedder.encode(corpus_texts)
 
 
-def _get_incident_corpus(limit: int = 200000):
+def _get_incident_corpus(limit: int = 200000) -> tuple[list[dict[str, Any]], str]:
     """Get incident corpus with caching.
 
     Args:
@@ -1811,63 +1920,6 @@ def load_model_metrics():
         }
 
 
-# Semantic search with embeddings
-@st.cache_data(ttl=3600, show_spinner="Building embedding cache...")
-def _get_incident_corpus(limit: int = 200000):
-    """Get incident corpus for semantic search with aggressive caching."""
-    try:
-        db = TriageDatabase()
-        incidents = db.get_analysis_history(limit=limit)
-        return incidents
-    except Exception as e:
-        st.error(f"Failed to load incident corpus: {e}")
-        return []
-
-
-def find_similar_incidents(
-    query_text: str, top_k: int = 5, similarity_threshold: float = 0.7
-) -> list:
-    """Find similar incidents using semantic search."""
-    try:
-        embedder = get_embedder()
-        query_embedding = embedder.encode([query_text])[0]
-
-        incidents = _get_incident_corpus()
-        if not incidents:
-            return []
-
-        # Get embeddings for all incidents
-        incident_texts = [inc.get("incident_text", "") for inc in incidents]
-        incident_embeddings = embedder.encode(incident_texts)
-
-        # Calculate cosine similarity
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        similarities = cosine_similarity([query_embedding], incident_embeddings)[0]
-
-        # Get top-k similar incidents above threshold
-        similar_indices = np.argsort(similarities)[::-1][:top_k]
-
-        results = []
-        for idx in similar_indices:
-            if similarities[idx] >= similarity_threshold:
-                incident = incidents[idx].copy()
-                incident["similarity_score"] = float(similarities[idx])
-                results.append(incident)
-
-        return results
-    except Exception as e:
-        st.error(f"Similarity search failed: {e}")
-        return []
-
-
-def check_for_duplicates(incident_text: str, threshold: float = 0.90) -> list:
-    """Check for duplicate incidents."""
-    return find_similar_incidents(
-        incident_text, top_k=5, similarity_threshold=threshold
-    )
-
-
 # ============================================================================
 # UI COMPONENTS
 # ============================================================================
@@ -1931,13 +1983,37 @@ def get_theme_colors():
 def create_confusion_matrix():
     """Create enhanced confusion matrix visualization"""
     metrics = load_model_metrics()
-    if "y_test" not in metrics:
+    if "y_test" not in metrics or "y_pred" not in metrics:
+        return go.Figure()
+
+    text_palette = get_text_palette()
+    secondary_text = text_palette["secondary"]
+
+    def _coerce_seq(seq) -> list:
+        if seq is None:
+            return []
+        if hasattr(seq, "tolist"):
+            try:
+                return list(seq.tolist())
+            except Exception:
+                pass
+        if isinstance(seq, (list, tuple)):
+            return list(seq)
+        return [seq]
+
+    y_test = _coerce_seq(metrics.get("y_test"))
+    y_pred = _coerce_seq(metrics.get("y_pred"))
+
+    if not y_test or not y_pred:
         return go.Figure()
 
     from sklearn.metrics import confusion_matrix
 
-    classes = sorted(set(metrics["y_test"]))
-    cm = confusion_matrix(metrics["y_test"], metrics["y_pred"], labels=classes)
+    classes = sorted(set(y_test))
+    if not classes:
+        return go.Figure()
+
+    cm = confusion_matrix(y_test, y_pred, labels=classes)
 
     display_labels = [get_display_name(c) for c in classes]
 
@@ -1978,14 +2054,14 @@ def create_confusion_matrix():
         title={
             "text": "Classification Accuracy",
             "x": 0.5,
-            "font": {"size": 16, "weight": 700, "family": "Inter", "color": "#1a202c"},
+            "font": {"size": 16, "weight": 700, "family": "Inter", "color": secondary_text},
         },
         xaxis_title="Predicted",
         yaxis_title="Actual",
         height=450,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font={"family": "Inter", "size": 11, "color": "#334155"},
+        font={"family": "Inter", "size": 11, "color": secondary_text},
         margin=dict(l=120, r=40, t=60, b=120),
         xaxis=dict(
             tickangle=-35, tickfont=dict(size=10), showgrid=False, side="bottom"
@@ -2271,6 +2347,10 @@ def create_sidebar():
 
     st.sidebar.markdown("## Settings")
 
+    # Theme: fixed to light for maximum readability (dark mode disabled)
+    st.session_state.theme_mode = "Light"
+    apply_theme_mode_css("Light")
+
     # Initialize session state for mode if not exists
     if "selected_mode" not in st.session_state:
         st.session_state.selected_mode = "Intelligence Dashboard"
@@ -2388,6 +2468,61 @@ def create_sidebar():
         help="Profile default applied" if active_profile else None,
         key=f"llm_checkbox_p{profile_id or 0}",
     )
+
+    provider_options = {
+        "Local (GGUF)": "local",
+        "Hugging Face Inference": "huggingface",
+    }
+    default_provider_idx = 1 if os.environ.get("HF_TOKEN") or os.environ.get("TRIAGE_HF_TOKEN") else 0
+    provider_label = st.sidebar.selectbox(
+        "LLM Provider",
+        list(provider_options.keys()),
+        index=default_provider_idx,
+        disabled=not use_llm,
+        help="Use hosted Hugging Face Inference when you have a token configured.",
+    )
+    llm_provider = provider_options.get(provider_label, "local")
+    huggingface_enabled = use_llm and llm_provider == "huggingface"
+
+    default_hf_model = (
+        os.environ.get("TRIAGE_HF_MODEL")
+        or os.environ.get("HF_MODEL")
+        or "mistralai/Mistral-7B-Instruct-v0.3"
+    )
+    hf_model_id = st.sidebar.text_input(
+        "HF Model ID",
+        value=default_hf_model,
+        disabled=not huggingface_enabled,
+        help="Example: mistralai/Mistral-7B-Instruct-v0.3",
+    )
+
+    hf_env_token = os.environ.get("TRIAGE_HF_TOKEN") or os.environ.get("HF_TOKEN") or ""
+    hf_byo_token = st.sidebar.checkbox(
+        "Use my Hugging Face token",
+        value=False,
+        disabled=not huggingface_enabled,
+        help="Token is kept in this session only. Prefer environment variables in production.",
+    )
+    hf_token_input = ""
+    if huggingface_enabled and hf_byo_token:
+        hf_token_input = st.sidebar.text_input(
+            "HF API Token",
+            value="",
+            placeholder="hf_xxx",
+            type="password",
+            help="Required for hosted inference.",
+        )
+        if hf_env_token:
+            st.sidebar.caption("Environment token detected; will be used if left blank.")
+    elif huggingface_enabled and hf_env_token:
+        st.sidebar.caption("Hugging Face token detected in environment.")
+
+    selected_hf_token = (hf_token_input or hf_env_token).strip()
+    if huggingface_enabled:
+        st.sidebar.caption(
+            f"UI rate limit: {HF_UI_MAX_REQUESTS} requests/{HF_UI_WINDOW_SECONDS}s per session."
+        )
+
     enable_viz = st.sidebar.checkbox(
         "Advanced Visualizations",
         value=default_enable_viz,
@@ -2511,6 +2646,26 @@ def main():
 def show_homepage(metrics, enable_viz):
     """Stunning professional security intelligence dashboard with advanced features."""
 
+    history: list = []
+    bookmarks: list = []
+    standalone_notes: list = []
+    bookmark_notes: list = []
+    total_notes = 0
+    total_incidents = 0
+    total_bookmarks = 0
+    incidents_24h = 0
+    incidents_7d = 0
+    incidents_30d = 0
+    most_common_label = ("None", 0)
+    avg_confidence = 0.0
+    severity_counts: Counter = Counter()
+    top_classifications: list = []
+    now = datetime.now()
+    text_palette = get_text_palette()
+    is_dark_mode = text_palette["is_dark"]
+    secondary_text = text_palette["secondary"]
+    muted_text = text_palette["muted"]
+
     # Professional Header with Centered Brand Logo
     from pathlib import Path
     import base64
@@ -2630,7 +2785,7 @@ def show_homepage(metrics, enable_viz):
                     <path d="M12 2v20M2 12h20"/>
                 </svg>
                 <div style="font-size: 1.75rem; font-weight: 900; color: #667eea; line-height: 1;">{total_incidents:,}</div>
-                <div style="font-size: 0.8rem; color: #475569; margin-top: 0.5rem; font-weight: 600;">TOTAL ANALYZED</div>
+                <div style="font-size: 0.8rem; color: {secondary_text}; margin-top: 0.5rem; font-weight: 600;">TOTAL ANALYZED</div>
                 {trend_badge}
             </div>
             """,
@@ -2645,7 +2800,7 @@ def show_homepage(metrics, enable_viz):
                     <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
                 </svg>
                 <div style="font-size: 1.75rem; font-weight: 900; color: #8b5cf6; line-height: 1;">{total_bookmarks:,}</div>
-                <div style="font-size: 0.8rem; color: #475569; margin-top: 0.5rem; font-weight: 600;">BOOKMARKS</div>
+                <div style="font-size: 0.8rem; color: {secondary_text}; margin-top: 0.5rem; font-weight: 600;">BOOKMARKS</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2659,7 +2814,7 @@ def show_homepage(metrics, enable_viz):
                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/>
                 </svg>
                 <div style="font-size: 1.75rem; font-weight: 900; color: #10b981; line-height: 1;">{total_notes:,}</div>
-                <div style="font-size: 0.8rem; color: #475569; margin-top: 0.5rem; font-weight: 600;">NOTES</div>
+                <div style="font-size: 0.8rem; color: {secondary_text}; margin-top: 0.5rem; font-weight: 600;">NOTES</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2673,7 +2828,7 @@ def show_homepage(metrics, enable_viz):
                     <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/>
                 </svg>
                 <div style="font-size: 1.75rem; font-weight: 900; color: #3b82f6; line-height: 1;">{avg_confidence:.0%}</div>
-                <div style="font-size: 0.8rem; color: #475569; margin-top: 0.5rem; font-weight: 600;">AVG CONFIDENCE</div>
+                <div style="font-size: 0.8rem; color: {secondary_text}; margin-top: 0.5rem; font-weight: 600;">AVG CONFIDENCE</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2687,7 +2842,7 @@ def show_homepage(metrics, enable_viz):
                     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>
                 </svg>
                 <div style="font-size: 1.75rem; font-weight: 900; color: #fb923c; line-height: 1;">{incidents_24h:,}</div>
-                <div style="font-size: 0.8rem; color: #475569; margin-top: 0.5rem; font-weight: 600;">LAST 24H</div>
+                <div style="font-size: 0.8rem; color: {secondary_text}; margin-top: 0.5rem; font-weight: 600;">LAST 24H</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2766,7 +2921,7 @@ def show_homepage(metrics, enable_viz):
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         st.markdown(
-                            f"<small style='color: #64748b;'>{timestamp_display}</small>",
+                            f"<small style='color: {secondary_text};'>{timestamp_display}</small>",
                             unsafe_allow_html=True,
                         )
                     with col2:
@@ -2778,7 +2933,7 @@ def show_homepage(metrics, enable_viz):
                     st.markdown("---")
                     st.markdown("**Incident Details:**")
                     st.markdown(
-                        f"<div style='background: #f8fafc; padding: 1rem; border-radius: 6px; border-left: 3px solid {confidence_color}; font-size: 0.9rem; color: #334155; line-height: 1.6;'>{incident_text}</div>",
+                        f"<div style='background: {'#111827' if is_dark_mode else '#f8fafc'}; padding: 1rem; border-radius: 6px; border-left: 3px solid {confidence_color}; font-size: 0.9rem; color: {muted_text}; line-height: 1.6;'>{incident_text}</div>",
                         unsafe_allow_html=True,
                     )
         else:
@@ -2867,7 +3022,7 @@ def show_homepage(metrics, enable_viz):
             <div style="padding: 1rem; background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(37, 99, 235, 0.03) 100%); border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid rgba(59, 130, 246, 0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div style="flex: 1;">
-                        <div style="font-size: 0.75rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Last 7 Days</div>
+                        <div style="font-size: 0.75rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Last 7 Days</div>
                         <div style="font-size: 1.5rem; font-weight: 900; color: #3b82f6; margin-top: 0.25rem;">{incidents_7d:,}</div>
                         {sparkline_7d_svg}
                     </div>
@@ -2879,7 +3034,7 @@ def show_homepage(metrics, enable_viz):
             <div style="padding: 1rem; background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(124, 58, 237, 0.03) 100%); border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid rgba(139, 92, 246, 0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div style="flex: 1;">
-                        <div style="font-size: 0.75rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Last 30 Days</div>
+                        <div style="font-size: 0.75rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Last 30 Days</div>
                         <div style="font-size: 1.5rem; font-weight: 900; color: #8b5cf6; margin-top: 0.25rem;">{incidents_30d:,}</div>
                         {sparkline_30d_svg}
                     </div>
@@ -2891,7 +3046,7 @@ def show_homepage(metrics, enable_viz):
             <div style="padding: 1rem; background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(124, 58, 237, 0.03) 100%); border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid rgba(139, 92, 246, 0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div style="flex: 1;">
-                        <div style="font-size: 0.75rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">LLM Usage</div>
+                        <div style="font-size: 0.75rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">LLM Usage</div>
                         <div style="font-size: 1.5rem; font-weight: 900; color: #8b5cf6; margin-top: 0.25rem;">{llm_usage:,}</div>
                         {sparkline_llm_svg}
                     </div>
@@ -2903,7 +3058,7 @@ def show_homepage(metrics, enable_viz):
             <div style="padding: 1rem; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(5, 150, 105, 0.03) 100%); border-radius: 10px; border: 1px solid rgba(16, 185, 129, 0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div style="flex: 1;">
-                        <div style="font-size: 0.75rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Avg Processing</div>
+                        <div style="font-size: 0.75rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Avg Processing</div>
                         <div style="font-size: 1.5rem; font-weight: 900; color: #10b981; margin-top: 0.25rem;">{avg_processing_time}</div>
                         <div style="height: 20px; margin-top: 0.5rem;"></div>
                     </div>
@@ -3012,6 +3167,9 @@ def single_incident_lab(
 ):
     """Single incident analysis with full functionality"""
 
+    text_palette = get_text_palette()
+    secondary_text = text_palette["secondary"]
+
     st.markdown(
         '<div class="section-header">Single Incident Analysis</div>',
         unsafe_allow_html=True,
@@ -3034,6 +3192,8 @@ def single_incident_lab(
         "Access Abuse": "Multiple failed logins for privileged account, then successful login from Russia at 3 AM.",
         "Benign Activity": "Routine software update to 200 endpoints flagged by scanner due to expected registry changes.",
     }
+
+    llm_provider, hf_model_id, selected_hf_token = get_llm_settings()
 
     col1, col2 = st.columns([2, 1])
 
@@ -3083,10 +3243,10 @@ def single_incident_lab(
 
     with col2:
         st.markdown(
-            """
+            f"""
             <div class="glass-card">
                 <h4 style="margin-top: 0; color: #667eea;">Quick Stats</h4>
-                <p style="color: #4b5563; line-height: 1.7; font-size: 0.95rem;">
+                <p style="color: {secondary_text}; line-height: 1.7; font-size: 0.95rem;">
                     <strong>Avg Analysis:</strong> 0.3s<br>
                     <strong>Success Rate:</strong> 98.5%<br>
                     <strong>Incidents Analyzed:</strong> 15,847<br>
@@ -3129,10 +3289,38 @@ def single_incident_lab(
                 # LLM enhancement
                 llm_opinion = None
                 if use_llm:
-                    with st.spinner("Getting LLM second opinion..."):
-                        llm_opinion = llm_second_opinion(
-                            incident_text, skip_preprocessing=not use_preprocessing
+                    valid_input, input_error = validate_llm_input_length(incident_text)
+                    if not valid_input:
+                        st.error(input_error)
+                    elif llm_provider == "huggingface" and not selected_hf_token:
+                        st.warning(
+                            "Add a Hugging Face token in the sidebar to use hosted inference."
                         )
+                    else:
+                        if llm_provider == "huggingface":
+                            allowed, retry_after = hf_rate_limit_allowance()
+                            if not allowed:
+                                st.warning(
+                                    f"Hugging Face limit reached. Wait {retry_after:.0f}s and try again."
+                                )
+                            else:
+                                with st.spinner("Getting LLM second opinion..."):
+                                    llm_opinion = llm_second_opinion(
+                                        incident_text,
+                                        skip_preprocessing=not use_preprocessing,
+                                        provider=llm_provider,
+                                        hf_model=hf_model_id,
+                                        hf_token=selected_hf_token,
+                                        max_tokens=UI_LLM_MAX_TOKENS,
+                                    )
+                        else:
+                            with st.spinner("Getting LLM second opinion..."):
+                                llm_opinion = llm_second_opinion(
+                                    incident_text,
+                                    skip_preprocessing=not use_preprocessing,
+                                    provider=llm_provider,
+                                    max_tokens=UI_LLM_MAX_TOKENS,
+                                )
 
                 # Store in session state
                 st.session_state.analysis_results = {
@@ -3520,7 +3708,7 @@ Preprocessed: {'Yes' if use_preprocessing else 'No'}
                     st.markdown(
                         f"""<div class="glass-card">
 <h4 style="color: #667eea;">Response Playbook: {get_display_name(prediction)}</h4>
-<ol style="color: #4b5563; line-height: 2;">
+<ol style="color: {secondary_text}; line-height: 2;">
 <li><strong>Initial Triage</strong> - Document incident details and timeline</li>
 <li><strong>Containment</strong> - Isolate affected systems if necessary</li>
 <li><strong>Investigation</strong> - Gather evidence and analyze indicators</li>
@@ -3647,6 +3835,12 @@ Preprocessed: {'Yes' if use_preprocessing else 'No'}
 def intelligence_dashboard(metrics, enable_viz):
     """The most stunning intelligence dashboard with professional visualizations"""
 
+    history: list = []
+    bookmarks: list = []
+
+    text_palette = get_text_palette()
+    secondary_text = text_palette["secondary"]
+
     # Get real-time database insights
     try:
         history = st.session_state.db.get_analysis_history(limit=10000)
@@ -3744,7 +3938,7 @@ def intelligence_dashboard(metrics, enable_viz):
                 </div>
                 <div style="font-size: 3rem; font-weight: 900; background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1;">{critical_count}</div>
                 <div style="color: #ef4444; font-weight: 700; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 0.1em; margin-top: 0.75rem;">Critical Threats</div>
-                <div style="color: #475569; font-size: 0.8rem; margin-top: 0.5rem;">{critical_pct:.1f}% of Total</div>
+                <div style="color: {secondary_text}; font-size: 0.8rem; margin-top: 0.5rem;">{critical_pct:.1f}% of Total</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3770,7 +3964,7 @@ def intelligence_dashboard(metrics, enable_viz):
                 </div>
                 <div style="font-size: 3rem; font-weight: 900; background: linear-gradient(135deg, #10b981 0%, #059669 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1;">{high_conf_pct:.0f}%</div>
                 <div style="color: #10b981; font-weight: 700; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 0.1em; margin-top: 0.75rem;">High Confidence</div>
-                <div style="color: #475569; font-size: 0.8rem; margin-top: 0.5rem;">≥80% Certainty</div>
+                <div style="color: {secondary_text}; font-size: 0.8rem; margin-top: 0.5rem;">≥80% Certainty</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3796,7 +3990,7 @@ def intelligence_dashboard(metrics, enable_viz):
                 </div>
                 <div style="font-size: 3rem; font-weight: 900; background: linear-gradient(135deg, #fb923c 0%, #f97316 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1;">{review_count}</div>
                 <div style="color: #fb923c; font-weight: 700; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 0.1em; margin-top: 0.75rem;">Needs Review</div>
-                <div style="color: #475569; font-size: 0.8rem; margin-top: 0.5rem;">&lt;60% Confidence</div>
+                <div style="color: {secondary_text}; font-size: 0.8rem; margin-top: 0.5rem;">&lt;60% Confidence</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3813,7 +4007,7 @@ def intelligence_dashboard(metrics, enable_viz):
 
     with col4:
         threat_display = most_active_threat[0].replace("_", " ").title()
-        threat_color = "#8b5cf6" if most_active_count > 0 else "#64748b"
+        threat_color = "#8b5cf6" if most_active_count > 0 else secondary_text
         st.markdown(
             f"""
             <div class="glass-card" style="text-align: center; background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(124, 58, 237, 0.1) 100%); border: 1px solid rgba(139, 92, 246, 0.3);">
@@ -3824,7 +4018,7 @@ def intelligence_dashboard(metrics, enable_viz):
                 </div>
                 <div style="font-size: 3rem; font-weight: 900; background: linear-gradient(135deg, {threat_color} 0%, {threat_color} 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1;">{most_active_count}</div>
                 <div style="color: {threat_color}; font-weight: 700; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 0.1em; margin-top: 0.75rem;">Top Threat</div>
-                <div style="color: #475569; font-size: 0.8rem; margin-top: 0.5rem;">{threat_display}</div>
+                <div style="color: {secondary_text}; font-size: 0.8rem; margin-top: 0.5rem;">{threat_display}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -4273,7 +4467,7 @@ def intelligence_dashboard(metrics, enable_viz):
                     </div>
                     <div>
                         <div style="font-size: 2rem; font-weight: 900; color: #3b82f6; line-height: 1;">{trend_7d}</div>
-                        <div style="color: #475569; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Last 7 Days</div>
+                        <div style="color: {secondary_text}; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Last 7 Days</div>
                     </div>
                 </div>
             </div>
@@ -4293,7 +4487,7 @@ def intelligence_dashboard(metrics, enable_viz):
                     </div>
                     <div>
                         <div style="font-size: 2rem; font-weight: 900; color: #8b5cf6; line-height: 1;">{trend_30d}</div>
-                        <div style="color: #475569; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Last 30 Days</div>
+                        <div style="color: {secondary_text}; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Last 30 Days</div>
                     </div>
                 </div>
             </div>
@@ -4313,7 +4507,7 @@ def intelligence_dashboard(metrics, enable_viz):
                     </div>
                     <div>
                         <div style="font-size: 2rem; font-weight: 900; color: #10b981; line-height: 1;">{metrics['n_classes']}</div>
-                        <div style="color: #475569; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Classifications</div>
+                        <div style="color: {secondary_text}; font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem;">Classifications</div>
                     </div>
                 </div>
             </div>
@@ -4358,9 +4552,9 @@ def intelligence_dashboard(metrics, enable_viz):
                         </svg>
                     </div>
                     <div style="flex-grow: 1;">
-                        <div style="font-size: 0.85rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;">Incidents Analyzed</div>
+                        <div style="font-size: 0.85rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;">Incidents Analyzed</div>
                         <div style="font-size: 1.75rem; font-weight: 900; color: #1a202c; line-height: 1;">{total_analyzed:,}</div>
-                        <div style="color: #475569; font-size: 0.85rem; margin-top: 0.5rem;">Total Database Entries</div>
+                        <div style="color: {secondary_text}; font-size: 0.85rem; margin-top: 0.5rem;">Total Database Entries</div>
                     </div>
                 </div>
             </div>
@@ -4379,9 +4573,9 @@ def intelligence_dashboard(metrics, enable_viz):
                         </svg>
                     </div>
                     <div style="flex-grow: 1;">
-                        <div style="font-size: 0.85rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;">ML Algorithm</div>
+                        <div style="font-size: 0.85rem; color: {secondary_text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;">ML Algorithm</div>
                         <div style="font-size: 1.25rem; font-weight: 800; color: #1a202c; line-height: 1.3;">Logistic Regression</div>
-                        <div style="color: #475569; font-size: 0.85rem; margin-top: 0.5rem;">TF-IDF Vectorization</div>
+                        <div style="color: {secondary_text}; font-size: 0.85rem; margin-top: 0.5rem;">TF-IDF Vectorization</div>
                     </div>
                 </div>
             </div>
@@ -4414,6 +4608,7 @@ def advanced_search_interface():
     auto_search_params = {}
     filter_message = ""
     show_back_button = False
+    results: list = []
 
     if (
         "search_filter_critical" in st.session_state
@@ -4634,8 +4829,18 @@ def advanced_search_interface():
             )
 
             if date_preset == "Custom":
-                start_date = st.date_input("Start Date")
-                end_date = st.date_input("End Date")
+                start_input = st.date_input("Start Date")
+                end_input = st.date_input("End Date")
+                start_date = (
+                    start_input[0]
+                    if isinstance(start_input, tuple) and start_input
+                    else start_input
+                )
+                end_date = (
+                    end_input[0]
+                    if isinstance(end_input, tuple) and end_input
+                    else end_input
+                )
             elif date_preset == "Last 7 days":
                 start_date = (datetime.now() - timedelta(days=7)).date()
                 end_date = datetime.now().date()
@@ -5137,6 +5342,11 @@ def batch_processing_tab(use_preprocessing, use_llm):
     import numpy as np
     from scipy.sparse import hstack
 
+    text_palette = get_text_palette()
+    secondary_text = text_palette["secondary"]
+
+    llm_provider, hf_model_id, selected_hf_token = get_llm_settings()
+
     st.markdown(
         '<div class="section-header">Batch Analysis Intelligence Center</div>',
         unsafe_allow_html=True,
@@ -5173,7 +5383,7 @@ def batch_processing_tab(use_preprocessing, use_llm):
         if not uploaded_file:
             # Professional empty state
             st.markdown(
-                """
+                f"""
                 <div style="
                     background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
                     border: 2px dashed rgba(102, 126, 234, 0.3);
@@ -5184,7 +5394,7 @@ def batch_processing_tab(use_preprocessing, use_llm):
                 ">
                     <div style="font-size: 3rem; margin-bottom: 16px; opacity: 0.6;">📤</div>
                     <h3 style="color: #667eea; margin-bottom: 8px;">Upload Your Data</h3>
-                    <p style="color: #475569; margin-bottom: 0;">
+                    <p style="color: {secondary_text}; margin-bottom: 0;">
                         Drag and drop a file or click to browse<br>
                         <small>Supports CSV, TXT, and JSONL formats</small>
                     </p>
@@ -5213,7 +5423,7 @@ def batch_processing_tab(use_preprocessing, use_llm):
                         <div style="font-size: 1.5rem;">✓</div>
                         <div>
                             <div style="font-weight: 600; color: #16a34a;">File Ready for Analysis</div>
-                            <div style="color: #475569; font-size: 0.9rem; margin-top: 4px;">
+                            <div style="color: {secondary_text}; font-size: 0.9rem; margin-top: 4px;">
                                 {uploaded_file.name} • {size_display}
                             </div>
                         </div>
@@ -5237,7 +5447,7 @@ def batch_processing_tab(use_preprocessing, use_llm):
                         st.markdown(
                             f'<div style="font-family: monospace; font-size: 0.85rem; padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.05);">'
                             f'<span style="color: #667eea; font-weight: 600;">{i:02d}</span> '
-                            f'<span style="color: #475569;">{display_line}</span>'
+                            f'<span style="color: {secondary_text};">{display_line}</span>'
                             f"</div>",
                             unsafe_allow_html=True,
                         )
@@ -5264,8 +5474,8 @@ def batch_processing_tab(use_preprocessing, use_llm):
                 padding: 16px;
                 margin-bottom: 12px;
             ">
-                <div style="font-size: 0.85rem; color: #475569; margin-bottom: 8px;">PREPROCESSING</div>
-                <div style="font-weight: 600; color: {'#22c55e' if use_preprocessing else '#64748b'};">
+                <div style="font-size: 0.85rem; color: {secondary_text}; margin-bottom: 8px;">PREPROCESSING</div>
+                <div style="font-weight: 600; color: {'#22c55e' if use_preprocessing else secondary_text};">
                     {'Enabled' if use_preprocessing else 'Disabled'}
                 </div>
             </div>
@@ -5281,8 +5491,8 @@ def batch_processing_tab(use_preprocessing, use_llm):
                 border-radius: 8px;
                 padding: 16px;
             ">
-                <div style="font-size: 0.85rem; color: #475569; margin-bottom: 8px;">LLM ENHANCEMENT</div>
-                <div style="font-weight: 600; color: {'#667eea' if use_llm else '#64748b'};">
+                <div style="font-size: 0.85rem; color: {secondary_text}; margin-bottom: 8px;">LLM ENHANCEMENT</div>
+                <div style="font-weight: 600; color: {'#667eea' if use_llm else secondary_text};">
                     {'Enabled' if use_llm else 'Disabled'}
                 </div>
             </div>
@@ -5402,35 +5612,73 @@ def batch_processing_tab(use_preprocessing, use_llm):
 
                     # Add LLM second opinion if enabled
                     if use_llm:
-                        import time
+                        valid_input, input_error = validate_llm_input_length(text)
+                        if not valid_input:
+                            result["llm_error"] = input_error
+                        elif llm_provider == "huggingface" and not selected_hf_token:
+                            result["llm_error"] = "Hugging Face token required for hosted inference"
+                        else:
+                            import time
 
-                        llm_start = time.time()
-                        status.text(
-                            f"Processing {idx+1}/{len(incidents)} (Running LLM analysis - this may take 5-10 seconds)..."
-                        )
-                        try:
-                            # Call LLM with raw text (skip_preprocessing=True to preserve original context)
-                            llm_opinion = llm_second_opinion(
-                                text, skip_preprocessing=True
+                            llm_start = time.time()
+                            status.text(
+                                f"Processing {idx+1}/{len(incidents)} (Running LLM analysis - this may take 5-10 seconds)..."
                             )
-                            llm_elapsed = time.time() - llm_start
-                            if llm_opinion:
-                                result["llm_second_opinion"] = llm_opinion
-                                result["llm_processing_time"] = llm_elapsed
-                                # Update MITRE techniques with LLM findings
-                                llm_mitre = llm_opinion.get("mitre_ids", [])
-                                if llm_mitre:
-                                    result["mitre_techniques"] = list(
-                                        set(all_mitre + llm_mitre)
+                            try:
+                                if llm_provider == "huggingface":
+                                    allowed, retry_after = hf_rate_limit_allowance()
+                                    if not allowed:
+                                        result["llm_error"] = (
+                                            f"HF rate limit reached; retry in {retry_after:.0f}s"
+                                        )
+                                        result["llm_processing_time"] = time.time() - llm_start
+                                    else:
+                                        llm_opinion = llm_second_opinion(
+                                            text,
+                                            skip_preprocessing=True,
+                                            provider=llm_provider,
+                                            hf_model=hf_model_id,
+                                            hf_token=selected_hf_token,
+                                            max_tokens=UI_LLM_MAX_TOKENS,
+                                        )
+                                        llm_elapsed = time.time() - llm_start
+                                        if llm_opinion:
+                                            result["llm_second_opinion"] = llm_opinion
+                                            result["llm_processing_time"] = llm_elapsed
+                                            llm_mitre = llm_opinion.get("mitre_ids", [])
+                                            if llm_mitre:
+                                                result["mitre_techniques"] = list(
+                                                    set(all_mitre + llm_mitre)
+                                                )
+                                        else:
+                                            result["llm_error"] = "LLM returned None"
+                                            result["llm_processing_time"] = llm_elapsed
+                                else:
+                                    llm_opinion = llm_second_opinion(
+                                        text,
+                                        skip_preprocessing=True,
+                                        provider=llm_provider,
+                                        max_tokens=UI_LLM_MAX_TOKENS,
                                     )
-                            else:
-                                result["llm_error"] = "LLM returned None"
-                                result["llm_processing_time"] = llm_elapsed
-                        except Exception as e:
-                            result["llm_error"] = f"LLM Error: {str(e)}"
-                            result["llm_processing_time"] = time.time() - llm_start
-                            # Show error in UI
-                            st.warning(f"LLM error on incident {idx+1}: {str(e)}")
+                                    llm_elapsed = time.time() - llm_start
+                                    if llm_opinion:
+                                        result["llm_second_opinion"] = llm_opinion
+                                        result["llm_processing_time"] = llm_elapsed
+                                        llm_mitre = llm_opinion.get("mitre_ids", [])
+                                        if llm_mitre:
+                                            result["mitre_techniques"] = list(
+                                                set(all_mitre + llm_mitre)
+                                            )
+                                    else:
+                                        result["llm_error"] = "LLM returned None"
+                                        result["llm_processing_time"] = llm_elapsed
+                            except Exception as e:
+                                result["llm_error"] = f"LLM Error: {str(e)}"
+                                result["llm_processing_time"] = time.time() - llm_start
+                                # Show error in UI
+                                st.warning(
+                                    f"LLM error on incident {idx+1}: {str(e)}"
+                                )
 
                     results.append(result)
                     progress_bar.progress((idx + 1) / len(incidents))
@@ -6634,10 +6882,10 @@ def batch_processing_tab(use_preprocessing, use_llm):
                                 margin: 8px 0;
                                 border-radius: 4px;
                             ">
-                                <div style="font-weight: 600; color: #334155;">
+                                <div style="font-weight: 600; color: {secondary_text};">
                                     {i}. {fp['classification']} (Confidence: {fp['confidence']:.1%}, FP Score: {fp['fp_score']:.1%})
                                 </div>
-                                <div style="font-size: 0.9rem; color: #475569; margin-top: 4px;">
+                                <div style="font-size: 0.9rem; color: {secondary_text}; margin-top: 4px;">
                                     {fp['incident']}
                                 </div>
                             </div>
@@ -6893,7 +7141,7 @@ Classifications: {len(unique_classifications)}
                         incidents = [
                             r for r in results if r["display_label"] == classification
                         ]
-                        avg_conf = np.mean([r["max_prob"] for r in incidents])
+                        avg_conf = float(np.mean([r["max_prob"] for r in incidents])) if incidents else 0.0
 
                         # Extract IOCs from all incidents of this type
                         import re
@@ -6956,7 +7204,7 @@ Classifications: {len(unique_classifications)}
                 incidents_of_type = [
                     r for r in results if r["display_label"] == classification
                 ]
-                avg_conf = np.mean([r["max_prob"] for r in incidents_of_type])
+                avg_conf = float(np.mean([r["max_prob"] for r in incidents_of_type])) if incidents_of_type else 0.0
 
                 playbook_rec = generate_soc_playbook_recommendation(
                     classification, avg_conf
@@ -7577,6 +7825,8 @@ def experimental_lab():
         ]
     )
 
+    llm_provider, hf_model_id, selected_hf_token = get_llm_settings()
+
     # Tab 0: Model Comparison
     with tabs[0]:
         st.markdown("### Model Performance Comparison")
@@ -7605,17 +7855,30 @@ def experimental_lab():
                 with st.spinner("Running comparison across model configurations..."):
                     comparison_results = []
 
+                    pred1 = ""
+                    probs1: list = []
+
+                    def _predict_with_model(vec, mdl, text):
+                        X = vec.transform([text])
+                        probs = (
+                            mdl.predict_proba(X)[0]
+                            if hasattr(mdl, "predict_proba")
+                            else []
+                        )
+                        pred = mdl.predict(X)[0]
+                        return pred, probs
+
                     # Configuration 1: Default with preprocessing
                     try:
                         vectorizer, model = load_vectorizer_and_model()
                         cleaned = clean_description(test_incident)
-                        pred1, probs1 = predict_event_type(vectorizer, model, cleaned)
+                        pred1, probs1 = _predict_with_model(vectorizer, model, cleaned)
                         comparison_results.append(
                             {
                                 "Configuration": "Default + Preprocessing",
                                 "Prediction": pred1,
-                                "Confidence": f"{max(probs1):.1%}",
-                                "Confidence_Val": max(probs1),
+                                "Confidence": f"{(max(probs1) if len(probs1) else 0):.1%}",
+                                "Confidence_Val": max(probs1) if len(probs1) else 0,
                                 "Processing": "Full cleaning",
                             }
                         )
@@ -7625,15 +7888,15 @@ def experimental_lab():
                     # Configuration 2: No preprocessing
                     try:
                         vectorizer, model = load_vectorizer_and_model()
-                        pred2, probs2 = predict_event_type(
+                        pred2, probs2 = _predict_with_model(
                             vectorizer, model, test_incident
                         )
                         comparison_results.append(
                             {
                                 "Configuration": "Default (No Preprocessing)",
                                 "Prediction": pred2,
-                                "Confidence": f"{max(probs2):.1%}",
-                                "Confidence_Val": max(probs2),
+                                "Confidence": f"{(max(probs2) if len(probs2) else 0):.1%}",
+                                "Confidence_Val": max(probs2) if len(probs2) else 0,
                                 "Processing": "Raw text",
                             }
                         )
@@ -7644,20 +7907,52 @@ def experimental_lab():
                     try:
                         vectorizer, model = load_vectorizer_and_model()
                         cleaned = clean_description(test_incident)
-                        pred3, probs3 = predict_event_type(vectorizer, model, cleaned)
+                        pred3, probs3 = _predict_with_model(vectorizer, model, cleaned)
 
                         # Get LLM second opinion
-                        llm_result = llm_second_opinion(
-                            test_incident, pred3, max(probs3)
+                        llm_result = None
+                        valid_input, input_error = validate_llm_input_length(
+                            test_incident
                         )
+                        if not valid_input:
+                            st.warning(input_error)
+                        elif llm_provider == "huggingface" and not selected_hf_token:
+                            st.warning(
+                                "Add a Hugging Face token in the sidebar to use hosted inference."
+                            )
+                        else:
+                            if llm_provider == "huggingface":
+                                allowed, retry_after = hf_rate_limit_allowance()
+                                if not allowed:
+                                    st.warning(
+                                        f"Hugging Face limit reached. Wait {retry_after:.0f}s before retrying."
+                                    )
+                                else:
+                                    llm_result = llm_second_opinion(
+                                        test_incident,
+                                        skip_preprocessing=False,
+                                        provider=llm_provider,
+                                        hf_model=hf_model_id,
+                                        hf_token=selected_hf_token,
+                                        max_tokens=UI_LLM_MAX_TOKENS,
+                                    )
+                            else:
+                                llm_result = llm_second_opinion(
+                                    test_incident,
+                                    skip_preprocessing=False,
+                                    provider=llm_provider,
+                                    max_tokens=UI_LLM_MAX_TOKENS,
+                                )
 
                         comparison_results.append(
                             {
                                 "Configuration": "Default + LLM Enhancement",
-                                "Prediction": llm_result.get("final_label", pred3),
-                                "Confidence": f"{llm_result.get('confidence', max(probs3)):.1%}",
-                                "Confidence_Val": llm_result.get(
-                                    "confidence", max(probs3)
+                                "Prediction": (llm_result or {}).get(
+                                    "final_label", (llm_result or {}).get("label", pred3)
+                                ),
+                                "Confidence": f"{(llm_result or {}).get('confidence', max(probs3) if len(probs3) else 0):.1%}",
+                                "Confidence_Val": (llm_result or {}).get(
+                                    "confidence", max(probs3) if len(probs3) else 0
                                 ),
                                 "Processing": "Full + LLM",
                             }
@@ -7667,8 +7962,8 @@ def experimental_lab():
                             {
                                 "Configuration": "Default + LLM Enhancement",
                                 "Prediction": pred1,
-                                "Confidence": f"{max(probs1):.1%}",
-                                "Confidence_Val": max(probs1),
+                                "Confidence": f"{(max(probs1) if len(probs1) else 0):.1%}",
+                                "Confidence_Val": max(probs1) if len(probs1) else 0,
                                 "Processing": "LLM unavailable",
                             }
                         )
@@ -8167,8 +8462,9 @@ def experimental_lab():
 
                         vectorizer = TfidfVectorizer()
                         tfidf_matrix = vectorizer.fit_transform([text1, text2])
+                        tfidf_dense = np.asarray(tfidf_matrix.todense())
                         similarity = cosine_similarity(
-                            tfidf_matrix[0:1], tfidf_matrix[1:2]
+                            tfidf_dense[0:1], tfidf_dense[1:2]
                         )[0][0]
 
                     else:  # Levenshtein

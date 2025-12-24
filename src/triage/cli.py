@@ -58,6 +58,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.triage.preprocess import clean_description  # type: ignore
 from src.triage.embeddings import get_embedder  # type: ignore
+from src.triage.llm_client import (  # type: ignore
+    HuggingFaceInferenceClient,
+    RateLimiter,
+)
 
 # -----------------------------------------------------------------------------
 # Globals
@@ -106,6 +110,17 @@ LLM_CTX_SIZE = int(os.environ.get("TRIAGE_LLM_CTX", "8192"))
 LLM_MAX_TOKENS = int(os.environ.get("TRIAGE_LLM_MAX_TOKENS", "1024"))
 LLM_TEMP = float(os.environ.get("TRIAGE_LLM_TEMP", "0.1"))
 
+HF_DEFAULT_MODEL = os.environ.get(
+    "TRIAGE_HF_MODEL",
+    os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.3"),
+)
+HF_ENDPOINT = os.environ.get(
+    "TRIAGE_HF_ENDPOINT", "https://api-inference.huggingface.co/models"
+)
+HF_TOKEN_ENV = os.environ.get("TRIAGE_HF_TOKEN") or os.environ.get("HF_TOKEN") or ""
+HF_RATE_LIMIT_MAX = int(os.environ.get("TRIAGE_HF_MAX_REQUESTS", "5"))
+HF_RATE_LIMIT_WINDOW = int(os.environ.get("TRIAGE_HF_WINDOW_SECONDS", "60"))
+
 # -----------------------------------------------------------------------------
 # LLM debug flag and helper
 # -----------------------------------------------------------------------------
@@ -122,6 +137,41 @@ def _llm_debug(msg: str) -> None:
         import sys
 
         print(f"[LLM DEBUG] {msg}", file=sys.stderr, flush=True)
+
+
+def _resolve_llm_provider(provider: str | None) -> str:
+    env_choice = (os.environ.get("TRIAGE_LLM_PROVIDER") or "").lower()
+    selected = (provider or env_choice).lower()
+
+    if not selected and HF_TOKEN_ENV:
+        selected = "huggingface"
+
+    if selected in {"hf", "huggingface", "hugging_face", "huggingface_inference"}:
+        return "huggingface"
+    return "local"
+
+
+def _resolve_hf_settings(model: str | None, token: str | None) -> tuple[str, str]:
+    resolved_model = model or HF_DEFAULT_MODEL
+    resolved_token = token or HF_TOKEN_ENV
+    return resolved_model, resolved_token
+
+
+def _get_hf_client(model: str, token: str, max_tokens: int):
+    global _hf_rate_limiter
+    if _hf_rate_limiter is None:
+        _hf_rate_limiter = RateLimiter(
+            max_requests=HF_RATE_LIMIT_MAX,
+            window_seconds=HF_RATE_LIMIT_WINDOW,
+        )
+
+    return HuggingFaceInferenceClient(
+        model=model,
+        token=token,
+        endpoint=HF_ENDPOINT,
+        max_new_tokens=max_tokens,
+        rate_limiter=_hf_rate_limiter,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -157,6 +207,7 @@ def _extract_indicators(text: str) -> set[str]:
 
 
 _llm_instance = None  # cached singleton
+_hf_rate_limiter: RateLimiter | None = None
 
 
 def get_llm():
@@ -316,9 +367,17 @@ def _lenient_extract_llm_fields(raw_text: str) -> dict:
     return {"label": label, "mitre_ids": mitre_ids, "rationale": ""}
 
 
-def llm_second_opinion(text: str, skip_preprocessing: bool = False) -> dict:
+def llm_second_opinion(
+    text: str,
+    skip_preprocessing: bool = False,
+    *,
+    provider: str | None = None,
+    hf_model: str | None = None,
+    hf_token: str | None = None,
+    max_tokens: int | None = None,
+) -> dict:
     """
-    Use a local LLM as a *second opinion* on the incident narrative.
+    Use a local LLM or Hugging Face Inference as a *second opinion* on the incident narrative.
 
     Args:
         text: The incident narrative text
@@ -326,17 +385,20 @@ def llm_second_opinion(text: str, skip_preprocessing: bool = False) -> dict:
                           If False (default), apply clean_description() for consistency.
                           Set via TRIAGE_LLM_RAW_TEXT=1 environment variable.
 
-    Returns a dict with:
+        Returns a dict with:
       - label: suggested event_type or 'uncertain'
       - mitre_ids: list of ATT&CK technique IDs (best-effort)
       - rationale: short SOC-style explanation
 
-    If the LLM backend is not configured or initialization fails, returns a
-    safe placeholder so the CLI never crashes.
+        If the configured backend is unavailable, returns a safe placeholder so the
+        CLI never crashes.
     """
     # Check environment variable for raw text mode (used by UI)
     if not skip_preprocessing:
         skip_preprocessing = os.environ.get("TRIAGE_LLM_RAW_TEXT", "0") == "1"
+
+    provider_choice = _resolve_llm_provider(provider)
+    max_gen_tokens = max_tokens if max_tokens is not None else LLM_MAX_TOKENS
 
     # Optionally preprocess the text for LLM (default behavior for CLI consistency)
     llm_text = text if skip_preprocessing else clean_description(text)
@@ -345,33 +407,6 @@ def llm_second_opinion(text: str, skip_preprocessing: bool = False) -> dict:
         _llm_debug(f"Using RAW text for LLM (length: {len(text)} chars)")
     else:
         _llm_debug(f"Using PREPROCESSED text for LLM (length: {len(llm_text)} chars)")
-
-    if Llama is None:
-        _llm_debug(
-            "llama-cpp-python is not available; returning uncertain placeholder."
-        )
-        return {
-            "label": "uncertain",
-            "mitre_ids": [],
-            "rationale": (
-                "LLM assist is not configured (llama-cpp-python not installed "
-                "or model path not set)."
-            ),
-        }
-
-    try:
-        llm = get_llm()
-        _llm_debug("Successfully initialized LLM backend.")
-    except Exception as exc:
-        _llm_debug(f"Failed to initialize LLM backend: {exc!r}")
-        return {
-            "label": "uncertain",
-            "mitre_ids": [],
-            "rationale": (
-                "LLM assist could not be initialized. "
-                f"Details: {exc}. Proceed with standard SOC triage without LLM."
-            ),
-        }
 
     system_instructions = (
         "You are assisting with SOC incident triage. "
@@ -422,84 +457,144 @@ Now respond with a single valid JSON object ONLY, with keys "label", "mitre_ids"
 Do not include any explanations, headings, notes, or examples.
 Do not repeat these instructions.
 """.strip()
+    data: dict | None = None
 
-    try:
-        # Prefer chat-style API with messages (works better for chat-tuned models)
-        _llm_debug("Starting LLM inference...")
-        import time
+    if provider_choice == "huggingface":
+        model, token = _resolve_hf_settings(hf_model, hf_token)
+        if token:
+            try:
+                hf_client = _get_hf_client(model, token, max_gen_tokens)
+                data = hf_client.generate_json(prompt, max_tokens=max_gen_tokens)
+                _llm_debug("HF inference completed successfully.")
+            except Exception as exc:  # pragma: no cover - network dependent
+                _llm_debug(
+                    f"HF inference failed: {exc!r}; falling back to local if available."
+                )
+        else:
+            _llm_debug(
+                "HF provider selected but no token provided; falling back to local."
+            )
 
-        start_time = time.time()
+    if data is None:
+        if Llama is None:
+            _llm_debug(
+                "llama-cpp-python is not available; returning uncertain placeholder."
+            )
+            return {
+                "label": "uncertain",
+                "mitre_ids": [],
+                "rationale": (
+                    "LLM assist is not configured (llama-cpp-python not installed "
+                    "or model path not set)."
+                ),
+            }
 
-        _llm_debug("Using chat completion API with messages.")
         try:
-            output = llm.create_chat_completion(
-                messages=messages,
-                max_tokens=LLM_MAX_TOKENS,
-                temperature=0.05,
-                top_p=0.5,
-                top_k=20,
-            )
-        except TypeError:
-            # Fallback: some llama-cpp versions expose chat completion via __call__
-            _llm_debug(
-                "create_chat_completion not available; falling back to __call__ with messages."
-            )
-            output = llm(
-                messages=messages,
-                max_tokens=LLM_MAX_TOKENS,
-                temperature=0.05,
-                top_p=0.5,
-                top_k=20,
-            )
+            llm = get_llm()
+            _llm_debug("Successfully initialized LLM backend.")
+        except Exception as exc:
+            _llm_debug(f"Failed to initialize LLM backend: {exc!r}")
+            return {
+                "label": "uncertain",
+                "mitre_ids": [],
+                "rationale": (
+                    "LLM assist could not be initialized. "
+                    f"Details: {exc}. Proceed with standard SOC triage without LLM."
+                ),
+            }
 
-        elapsed = time.time() - start_time
-        _llm_debug(f"LLM inference completed in {elapsed:.2f} seconds")
-
-        choice = output["choices"][0]
-        raw_text = (
-            choice.get("message", {}).get("content", "") or choice.get("text", "")
-        ).strip()
-        _llm_debug(f"Raw LLM output: {raw_text!r}")
-
-        # Preprocess and normalize LLM output for JSON parsing
-        text_for_json = raw_text.strip()
-        # Remove code block fences if present
-        if text_for_json.startswith("```"):
-            lines = text_for_json.splitlines()
-            if lines:
-                lines = lines[1:]  # drop opening ```
-                if lines and lines[-1].strip().startswith("```"):
-                    lines = lines[:-1]  # drop closing ```
-                text_for_json = "\n".join(lines).strip()
-        # Remove single quotes around the entire output if present
-        if text_for_json.startswith("'") and text_for_json.endswith("'"):
-            candidate = text_for_json[1:-1].strip()
-            if candidate.startswith("{") and candidate.endswith("}"):
-                text_for_json = candidate
-        _llm_debug(f"Normalized text for JSON parsing: {text_for_json!r}")
-
-        # Quick sanity check for obviously-wrong template echoes or empty output
-        if not text_for_json or "[INST]" in text_for_json:
-            _llm_debug(
-                "LLM output is empty or appears to be a chat template echo; "
-                "treating as invalid and falling back."
-            )
-            raise ValueError(f"Invalid non-JSON output from LLM: {text_for_json!r}")
-
-        # First try direct JSON parse; if it fails, fall back to lenient extraction.
         try:
-            _llm_debug("Attempting direct JSON parse of LLM output.")
-            data = json.loads(text_for_json)
-        except Exception as parse_exc:
-            _llm_debug(
-                f"Direct JSON parse failed: {parse_exc!r}; falling back to lenient field extraction for label/mitre_ids only."
-            )
-            # We only need 'label' and 'mitre_ids'; ignore malformed rationale text.
-            data = _lenient_extract_llm_fields(text_for_json)
+            # Prefer chat-style API with messages (works better for chat-tuned models)
+            _llm_debug("Starting LLM inference...")
+            import time
 
-    except Exception as exc:
-        # Fall back to a conservative, non-breaking structure
-        _llm_debug(f"LLM assist failed or returned invalid JSON: {exc!r}")
+            start_time = time.time()
+
+            # Build a simple chat-style prompt string for llama_cpp
+            prompt_text = "\n".join(
+                f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+                for m in messages
+            )
+
+            try:
+                output = llm(
+                    prompt=prompt_text,
+                    max_tokens=max_gen_tokens,
+                    temperature=0.05,
+                    top_p=0.5,
+                    top_k=20,
+                )
+            except TypeError:
+                # Fallback for llama_cpp versions that use positional prompt
+                output = llm(
+                    prompt_text,
+                    max_tokens=max_gen_tokens,
+                    temperature=0.05,
+                    top_p=0.5,
+                    top_k=20,
+                )
+
+            elapsed = time.time() - start_time
+            _llm_debug(f"LLM inference completed in {elapsed:.2f} seconds")
+
+            choice = output.get("choices", [{}])[0] if isinstance(output, dict) else {}
+            raw_text = (
+                choice.get("message", {}).get("content", "")
+                or choice.get("text", "")
+            ).strip()
+            _llm_debug(f"Raw LLM output: {raw_text!r}")
+
+            # Preprocess and normalize LLM output for JSON parsing
+            text_for_json = raw_text.strip()
+            # Remove code block fences if present
+            if text_for_json.startswith("```"):
+                lines = text_for_json.splitlines()
+                if lines:
+                    lines = lines[1:]  # drop opening ```
+                    if lines and lines[-1].strip().startswith("```"):
+                        lines = lines[:-1]  # drop closing ```
+                    text_for_json = "\n".join(lines).strip()
+            # Remove single quotes around the entire output if present
+            if text_for_json.startswith("'") and text_for_json.endswith("'"):
+                candidate = text_for_json[1:-1].strip()
+                if candidate.startswith("{") and candidate.endswith("}"):
+                    text_for_json = candidate
+            _llm_debug(f"Normalized text for JSON parsing: {text_for_json!r}")
+
+            # Quick sanity check for obviously-wrong template echoes or empty output
+            if not text_for_json or "[INST]" in text_for_json:
+                _llm_debug(
+                    "LLM output is empty or appears to be a chat template echo; "
+                    "treating as invalid and falling back."
+                )
+                raise ValueError(
+                    f"Invalid non-JSON output from LLM: {text_for_json!r}"
+                )
+
+            # First try direct JSON parse; if it fails, fall back to lenient extraction.
+            try:
+                _llm_debug("Attempting direct JSON parse of LLM output.")
+                data = json.loads(text_for_json)
+            except Exception as parse_exc:
+                _llm_debug(
+                    f"Direct JSON parse failed: {parse_exc!r}; falling back to lenient field extraction for label/mitre_ids only."
+                )
+                # We only need 'label' and 'mitre_ids'; ignore malformed rationale text.
+                data = _lenient_extract_llm_fields(text_for_json)
+
+        except Exception as exc:
+            # Fall back to a conservative, non-breaking structure
+            _llm_debug(f"LLM assist failed or returned invalid JSON: {exc!r}")
+            safe_label = "uncertain"
+            safe_rationale = build_llm_rationale(safe_label, llm_text)
+            return {
+                "label": safe_label,
+                "mitre_ids": [],
+                "rationale": safe_rationale,
+            }
+
+    if data is None:
+        _llm_debug("LLM output was empty after all backends; returning uncertain.")
         safe_label = "uncertain"
         safe_rationale = build_llm_rationale(safe_label, llm_text)
         return {

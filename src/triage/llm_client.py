@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Tuple
+
+import requests
 
 # Optional debug flag shared with the rest of the project
 LLM_DEBUG = os.getenv("NLP_TRIAGE_LLM_DEBUG", "0").strip() not in {
@@ -25,6 +29,145 @@ def _debug(msg: str) -> None:
     """Lightweight debug logger for LLM operations."""
     if LLM_DEBUG:
         print(f"[LLM CLIENT] {msg}", flush=True)
+
+
+@dataclass
+class RateLimiter:
+    """Sliding-window rate limiter used for hosted LLM calls."""
+
+    max_requests: int = 5
+    window_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        self._events: deque[datetime] = deque()
+
+    def check(self) -> Tuple[bool, float]:
+        now = datetime.utcnow()
+        window_start = now - timedelta(seconds=self.window_seconds)
+        while self._events and self._events[0] < window_start:
+            self._events.popleft()
+
+        if len(self._events) >= self.max_requests:
+            retry_after = self.window_seconds - (now - self._events[0]).total_seconds()
+            return False, max(retry_after, 0.0)
+
+        self._events.append(now)
+        return True, 0.0
+
+
+@dataclass
+class HuggingFaceInferenceClient:
+    """Minimal HF Inference API client with JSON extraction and rate limiting."""
+
+    model: str
+    token: str
+    endpoint: str = "https://api-inference.huggingface.co/models"
+    timeout: int = 60
+    max_prompt_chars: int = 8000
+    max_new_tokens: int = 512
+    temperature: float = 0.05
+    rate_limiter: Optional[RateLimiter] = None
+
+    def __post_init__(self) -> None:
+        if not self.token:
+            raise ValueError("HuggingFaceInferenceClient requires a token")
+        if not self.model:
+            raise ValueError("HuggingFaceInferenceClient requires a model id")
+
+        self.endpoint = self.endpoint.rstrip("/")
+        self._session = requests.Session()
+        _debug(
+            f"Initialised HF Inference client for model='{self.model}' at endpoint='{self.endpoint}'"
+        )
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
+
+    def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            snippet = match.group(0)
+            try:
+                return json.loads(snippet)
+            except Exception:
+                _debug("HF parse: failed to decode extracted JSON snippet")
+        _debug("HF parse: no JSON found, returning empty dict")
+        return {}
+
+    def generate_json(self, prompt: str, *, max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        prompt_to_send = prompt if len(prompt) <= self.max_prompt_chars else prompt[: self.max_prompt_chars]
+        if len(prompt) > self.max_prompt_chars:
+            _debug(
+                f"Prompt truncated from {len(prompt)} to {len(prompt_to_send)} characters for HF inference."
+            )
+
+        if self.rate_limiter:
+            allowed, retry_after = self.rate_limiter.check()
+            if not allowed:
+                raise RuntimeError(
+                    f"Rate limit exceeded: wait {retry_after:.0f}s before retrying Hugging Face inference."
+                )
+
+        params = {
+            "max_new_tokens": max_tokens or self.max_new_tokens,
+            "temperature": self.temperature,
+            "return_full_text": False,
+            "do_sample": True,
+        }
+
+        payload = {
+            "inputs": prompt_to_send,
+            "parameters": params,
+            "options": {"wait_for_model": True},
+        }
+
+        url = f"{self.endpoint}/{self.model}"
+        _debug(
+            f"Calling HF Inference: url='{url}', max_new_tokens={params['max_new_tokens']}, temperature={params['temperature']}"
+        )
+        response = self._session.post(
+            url,
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+
+        if response.status_code == 401:
+            raise PermissionError("Hugging Face token rejected (401 Unauthorized)")
+        if response.status_code == 429:
+            detail = response.json().get("error") if response.headers.get("content-type", "").startswith("application/json") else response.text
+            raise RuntimeError(f"Hugging Face rate limit hit (429): {detail}")
+        if response.status_code >= 500:
+            raise RuntimeError(f"Hugging Face service error {response.status_code}: {response.text}")
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Hugging Face request failed {response.status_code}: {response.text}"
+            )
+
+        data = response.json()
+        _debug(f"HF raw response: {str(data)[:500]}")
+
+        generated_text = ""
+        if isinstance(data, list) and data:
+            generated_text = str(data[0].get("generated_text", ""))
+        elif isinstance(data, dict):
+            generated_text = str(data.get("generated_text", "")) or str(
+                data.get("choices", [{}])[0].get("text", "")
+            )
+
+        if not generated_text:
+            _debug("HF response did not include generated_text; returning raw JSON")
+            return data if isinstance(data, dict) else {}
+
+        return self._parse_json_from_text(generated_text)
 
 
 @dataclass
@@ -128,9 +271,20 @@ class LocalLLMClient:
             stop=stop,
         )
 
-        # llama_cpp returns a dict with `choices[0]["text"]`
-        text = result.get("choices", [{}])[0].get("text", "")
-        return str(text).strip()
+        # llama_cpp returns a dict with `choices[0]["text"]`; some builds may stream
+        if isinstance(result, dict):
+            text = result.get("choices", [{}])[0].get("text", "")
+            return str(text).strip()
+
+        # Streaming iterator fallback
+        try:
+            first_chunk = next(iter(result))
+            if isinstance(first_chunk, dict):
+                text = first_chunk.get("choices", [{}])[0].get("text", "")
+                return str(text).strip()
+            return str(first_chunk).strip()
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------
     # JSON-focused helper used by CLI second-opinion logic
@@ -176,4 +330,8 @@ class LocalLLMClient:
             return {}
 
 
-__all__ = ["LocalLLMClient"]
+__all__ = [
+    "LocalLLMClient",
+    "HuggingFaceInferenceClient",
+    "RateLimiter",
+]
