@@ -188,7 +188,7 @@ def get_llm_settings() -> tuple[str, str, str | None]:
     provider = st.session_state.get("llm_provider", default_provider)
     hf_model = st.session_state.get(
         "hf_model_id",
-        secrets_model or env_model or "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        secrets_model or env_model or "meta-llama/Llama-3.1-8B-Instruct:cerebras",
     )
     hf_token = st.session_state.get("selected_hf_token") or secrets_token or env_token
     return provider, hf_model, hf_token

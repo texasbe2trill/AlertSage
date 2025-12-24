@@ -198,12 +198,22 @@ Prefer not to download a GGUF model? Use Hugging Face Inference instead:
 
 For deployment, the Streamlit demo uses hosted Hugging Face inference, while local GGUF/llama.cpp is supported via `pip install -e ".[dev]"`.
 
-**LLM Assist Demo:** the public Streamlit demo will auto-use Hugging Face hosted inference when `HF_TOKEN` (and optional `HF_MODEL`) No local llama.cpp install is required for demo users.
+**LLM Assist Demo:** the public Streamlit demo will auto-use Hugging Face hosted inference when `HF_TOKEN` (and optional `HF_MODEL`) are configured. No local llama.cpp install is required for demo users.
+
+The demo now uses the Hugging Face **Router** endpoint with chat completions:
+`https://router.huggingface.co/v1/chat/completions`. Models may require provider
+suffixes (for example `meta-llama/Llama-3.1-8B-Instruct:cerebras`).
 
 1. Export `HF_TOKEN` (or `TRIAGE_HF_TOKEN`) with your personal token.
-2. Optional: set `TRIAGE_HF_MODEL`/`HF_MODEL` (default `mistralai/Mistral-7B-Instruct-v0.3`).
+2. Optional: set `TRIAGE_HF_MODEL`/`HF_MODEL` (default `meta-llama/Llama-3.1-8B-Instruct:cerebras`).
 3. The CLI automatically routes LLM second-opinion calls to Hugging Face when a token is present—no local model required.
 4. In the Streamlit UI, enable **LLM Enhancement**, choose **Hugging Face Inference**, and supply your token in the sidebar. The UI enforces a 5-requests/60s session limit, an 8k-character input cap, and a 512 max-token generation limit per request.
+
+Example Streamlit secrets:
+```
+HF_TOKEN="your_token"
+HF_MODEL="meta-llama/Llama-3.1-8B-Instruct:cerebras"
+```
 
 Tokens are never hardcoded; keep them in environment variables or a local secrets manager.
 

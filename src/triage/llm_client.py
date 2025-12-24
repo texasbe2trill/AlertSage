@@ -21,7 +21,7 @@ LLM_DEBUG = os.getenv("NLP_TRIAGE_LLM_DEBUG", "0").strip() not in {
 HF_DEFAULT_MODEL = (
     os.getenv("TRIAGE_HF_MODEL")
     or os.getenv("HF_MODEL")
-    or "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    or "meta-llama/Llama-3.1-8B-Instruct:cerebras"
 )
 HF_TOKEN_ENV = os.getenv("TRIAGE_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
 
@@ -70,10 +70,10 @@ def resolve_hf_credentials(
     if not resolved_model:
         resolved_model = HF_DEFAULT_MODEL
 
-    # Hugging Face Inference expects a repo id, not a local GGUF path
+    # Hugging Face Router expects a repo id (optionally with provider suffix), not a local GGUF path
     if resolved_model.lower().endswith(".gguf"):
         _debug(
-            "HF model appears to be a GGUF filename; use a repo id like 'meta-llama/Meta-Llama-3.1-8B-Instruct'."
+            "HF model appears to be a GGUF filename; use a repo id like 'meta-llama/Llama-3.1-8B-Instruct:cerebras'."
         )
 
     return resolved_model, resolved_token, bool(resolved_token)
@@ -105,12 +105,12 @@ class RateLimiter:
 
 @dataclass
 class HuggingFaceInferenceClient:
-    """Minimal HF Inference API client with JSON extraction and rate limiting."""
+    """Minimal HF Router client with chat completions and rate limiting."""
 
     model: str
     token: str
-    endpoint: str = "https://api-inference.huggingface.co/models"
-    timeout: int = 60
+    endpoint: str = "https://router.huggingface.co"
+    timeout: int = 120
     max_prompt_chars: int = 8000
     max_new_tokens: int = 512
     temperature: float = 0.05
@@ -125,13 +125,14 @@ class HuggingFaceInferenceClient:
         self.endpoint = self.endpoint.rstrip("/")
         self._session = requests.Session()
         _debug(
-            f"Initialised HF Inference client for model='{self.model}' at endpoint='{self.endpoint}'"
+            f"Initialised HF Router client for model='{self.model}' at endpoint='{self.endpoint}'"
         )
 
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
+            "Content-Type": "application/json",
         }
 
     def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
@@ -164,22 +165,17 @@ class HuggingFaceInferenceClient:
                     f"Rate limit exceeded: wait {retry_after:.0f}s before retrying Hugging Face inference."
                 )
 
-        params = {
-            "max_new_tokens": max_tokens or self.max_new_tokens,
-            "temperature": self.temperature,
-            "return_full_text": False,
-            "do_sample": True,
-        }
-
         payload = {
-            "inputs": prompt_to_send,
-            "parameters": params,
-            "options": {"wait_for_model": True},
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt_to_send}],
+            "max_tokens": max_tokens or self.max_new_tokens,
+            "temperature": self.temperature,
+            "stream": False,
         }
 
-        url = f"{self.endpoint}/{self.model}"
+        url = f"{self.endpoint}/v1/chat/completions"
         _debug(
-            f"Calling HF Inference: url='{url}', max_new_tokens={params['max_new_tokens']}, temperature={params['temperature']}"
+            f"Calling HF Router: url='{url}', max_tokens={payload['max_tokens']}, temperature={payload['temperature']}"
         )
         response = self._session.post(
             url,
@@ -191,7 +187,11 @@ class HuggingFaceInferenceClient:
         if response.status_code == 401:
             raise PermissionError("Hugging Face token rejected (401 Unauthorized)")
         if response.status_code == 429:
-            detail = response.json().get("error") if response.headers.get("content-type", "").startswith("application/json") else response.text
+            detail = (
+                response.json().get("error")
+                if response.headers.get("content-type", "").startswith("application/json")
+                else response.text
+            )
             raise RuntimeError(f"Hugging Face rate limit hit (429): {detail}")
         if response.status_code >= 500:
             raise RuntimeError(f"Hugging Face service error {response.status_code}: {response.text}")
@@ -204,15 +204,18 @@ class HuggingFaceInferenceClient:
         _debug(f"HF raw response: {str(data)[:500]}")
 
         generated_text = ""
-        if isinstance(data, list) and data:
-            generated_text = str(data[0].get("generated_text", ""))
-        elif isinstance(data, dict):
-            generated_text = str(data.get("generated_text", "")) or str(
-                data.get("choices", [{}])[0].get("text", "")
+        try:
+            generated_text = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "") or ""
             )
+        except Exception:
+            _debug("HF response parsing failed; returning raw JSON")
+            return data if isinstance(data, dict) else {}
 
         if not generated_text:
-            _debug("HF response did not include generated_text; returning raw JSON")
+            _debug("HF response did not include message content; returning raw JSON")
             return data if isinstance(data, dict) else {}
 
         return self._parse_json_from_text(generated_text)

@@ -112,11 +112,17 @@ LLM_MAX_TOKENS = int(os.environ.get("TRIAGE_LLM_MAX_TOKENS", "1024"))
 LLM_TEMP = float(os.environ.get("TRIAGE_LLM_TEMP", "0.1"))
 
 HF_DEFAULT_MODEL = os.environ.get(
-    "TRIAGE_HF_MODEL",
-    os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.3"),
+    "TRIAGE_HF_MODEL_DEFAULT",
+    os.environ.get(
+        "TRIAGE_HF_MODEL",
+        os.environ.get(
+            "HF_MODEL",
+            "meta-llama/Llama-3.1-8B-Instruct:cerebras",
+        ),
+    ),
 )
 HF_ENDPOINT = os.environ.get(
-    "TRIAGE_HF_ENDPOINT", "https://api-inference.huggingface.co/models"
+    "TRIAGE_HF_ENDPOINT", "https://router.huggingface.co"
 )
 HF_TOKEN_ENV = os.environ.get("TRIAGE_HF_TOKEN") or os.environ.get("HF_TOKEN") or ""
 HF_RATE_LIMIT_MAX = int(os.environ.get("TRIAGE_HF_MAX_REQUESTS", "5"))
@@ -491,8 +497,8 @@ Do not repeat these instructions.
                 "label": "uncertain",
                 "mitre_ids": [],
                 "rationale": (
-                    "LLM assist is not configured. For the public demo, set HF_TOKEN (and optional HF_MODEL) in Streamlit secrets. "
-                    "For local usage, install llama-cpp-python and set a GGUF model path."
+                    "LLM assist is not configured. Set HF_TOKEN (and optional HF_MODEL) in Streamlit secrets, "
+                    "or run locally with llama.cpp + GGUF."
                 ),
             }
 
