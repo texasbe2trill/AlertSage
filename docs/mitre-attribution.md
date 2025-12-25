@@ -126,4 +126,16 @@ This activity indicates an initial access attempt via application-layer exploita
   ]
 }
 
- 
+## UI Screenshots – MITRE ATT&CK Integration
+
+### Single Incident Analysis (MITRE Coverage)
+![Single Incident Analysis – MITRE Coverage](images/mitre_single_incident_analysis.png)
+
+### Visualizations – MITRE ATT&CK Coverage Heatmap
+![MITRE ATT&CK Coverage Heatmap](images/mitre_coverage_heatmap.png)
+
+### Threat Intelligence – Mapped Techniques
+![Threat Intelligence – MITRE Techniques](images/mitre_threat_intel.png)
+
+### SOC Playbook – Response Context
+![SOC Playbook – Response](images/mitre_soc_playbook.png)
