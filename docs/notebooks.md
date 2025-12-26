@@ -1,10 +1,33 @@
 # Notebooks Overview
 
-The project includes 10 comprehensive Jupyter notebooks covering the complete machine learning pipeline from exploratory data analysis to production-ready hybrid models. Each notebook has been enhanced with professional visualizations, comprehensive markdown analysis, and practical insights.
+The project includes 11 comprehensive Jupyter notebooks covering the complete machine learning pipeline from getting started through production-ready hybrid models. Each notebook has been enhanced with professional visualizations, comprehensive markdown analysis, and practical insights.
 
 ---
 
 ## Notebook Sequence
+
+### 0. 00_getting_started_tutorial.ipynb - Interactive Getting Started Guide ⭐ **START HERE**
+
+**Purpose**: Beginner-friendly interactive tutorial introducing AlertSage fundamentals for new users and contributors.
+
+**Key Features**:
+
+- **Environment Setup**: Verification of Python, packages, models, and dataset
+- **Model Loading**: Load pre-trained TF-IDF vectorizer and baseline logistic regression
+- **First Prediction**: Step-by-step walkthrough of single incident analysis
+- **Batch Processing**: Analyze 30 diverse incidents across all 10 event types
+- **4 Interactive Visualizations**:
+  - Class distribution bar chart
+  - Confidence score histogram with uncertainty threshold
+  - Confidence by event type box plots
+  - Confusion matrix heatmap
+- **Uncertainty Analysis**: Understanding confidence thresholds (50%, 60%, 75%)
+- **LLM Integration**: Conceptual overview of ML+LLM hybrid approach
+- **3 Hands-On Exercises**: Custom incident analysis, threshold experimentation, problematic case identification
+- **Next Steps Guide**: Links to advanced notebooks, CLI usage, Streamlit UI, and documentation
+
+**Learning Outcomes**: Understand incident triage workflow, interpret confidence scores, create visualizations, recognize when LLM assistance is needed, practice with real scenarios.
+
 
 ### 1. 01_explore_dataset.ipynb - Dataset Exploration & Quality Assessment
 
@@ -172,9 +195,10 @@ jupyter lab notebooks/
 
 ### Recommended Reading Order
 
-**New users**: 01 → 02 → 03 → 05 → 06-09 → 10  
-**SOC analysts**: 01 → 05 → 09  
-**ML engineers**: 03 → 04 → 08 → 10
+**New users**: **00** → 01 → 02 → 03 → 05 → 06-09 → 10  
+**SOC analysts**: **00** → 01 → 05 → 09  
+**ML engineers**: **00** → 03 → 04 → 08 → 10  
+**Contributors**: **00** → 01 → 02 → 03
 
 ---
 
