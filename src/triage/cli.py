@@ -1053,8 +1053,15 @@ def print_llm_panel(result: dict) -> None:
 # Loading artifacts
 # -----------------------------------------------------------------------------
 def load_artifacts():
-    vectorizer = joblib.load(PROJECT_ROOT / "models/vectorizer.joblib")
-    clf = joblib.load(PROJECT_ROOT / "models/enhanced_logreg.joblib")
+    """
+    Load ML models and embedder.
+    
+    Uses cached loader from model.py to prevent repeated disk I/O.
+    Models are loaded once and cached in memory for the process lifetime.
+    """
+    from src.triage.model import load_vectorizer_and_model
+    
+    vectorizer, clf = load_vectorizer_and_model()
     embedder = get_embedder()
     classes = clf.classes_
     return vectorizer, clf, embedder, classes
