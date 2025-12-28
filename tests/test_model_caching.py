@@ -15,10 +15,6 @@ import pytest
 
 def test_cache_prevents_reloading(tmp_path, monkeypatch):
     """Test that models are only loaded from disk once."""
-    # Import model module fresh
-    if "src.triage.model" in sys.modules:
-        importlib.reload(sys.modules["src.triage.model"])
-    
     from src.triage.model import load_vectorizer_and_model
     import src.triage.model as model_module
     
@@ -115,8 +111,15 @@ def test_cache_consistency_across_predictions():
 
 def test_cli_load_artifacts_uses_cache():
     """Test that CLI's load_artifacts() function uses the cache."""
-    from src.triage.cli import load_artifacts
-    import src.triage.model as model_module
+    from triage.cli import load_artifacts
+    import sys
+    
+    # Get the model module that CLI will actually use
+    # (could be either triage.model or src.triage.model depending on installation)
+    try:
+        import triage.model as model_module
+    except ImportError:
+        import src.triage.model as model_module
     
     # Reset cache
     model_module._VECTORIZER = None
