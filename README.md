@@ -29,6 +29,7 @@ Try AlertSage in your browser:
 - **Docs site**: published with MkDocs Material (see [docs/index.md](docs/index.md) locally or `https://texasbe2trill.github.io/AlertSage/` after deployment)
 - **Getting started**: [docs/getting-started.md](docs/getting-started.md)
 - **CLI usage**: [docs/cli.md](docs/cli.md)
+- **Performance**: [docs/performance.md](docs/performance.md) - Model caching optimization
 - **Data & generator**: [docs/data-and-generator.md](docs/data-and-generator.md)
 - **Development workflow**: [docs/development.md](docs/development.md)
 
@@ -54,6 +55,7 @@ Try AlertSage in your browser:
 | Category                | Feature                       | Description                                                  |
 | ----------------------- | ----------------------------- | ------------------------------------------------------------ |
 | 🎨 **User Interface**   | Streamlit Web Application     | Interactive triage with visual analytics and bulk processing |
+| 🚀 **Performance**      | Model Caching                 | 22,885x faster cached loads for batch processing (~0.001ms)  |
 | 🚀 **Performance**      | Smart LLM Mode                | Two-pass optimization: 60-80% faster than full LLM analysis  |
 | ⚡ **GPU Acceleration** | Automatic GPU Detection       | Auto-enables Metal/CUDA/Vulkan for ~10x LLM speedup          |
 | 🤖 **LLM Integration**  | Local llama.cpp Models        | Privacy-first LLM for generation and second opinions         |
@@ -892,7 +894,7 @@ flake8 src/ tests/
 
 - [ ] **Docker Deployment**: Containerized setup with docker-compose
 - [ ] **Expanded CI/CD**: More linters, security scanning, automated releases
-- [ ] **Performance Optimization**: Caching, batch processing improvements
+- [x] **Performance Optimization**: Model caching (22,885x speedup) - See [docs/performance.md](docs/performance.md)
 - [ ] **Real-world Evaluation**: Testing on publicly available SOC datasets
 
 ### Documentation & Community
