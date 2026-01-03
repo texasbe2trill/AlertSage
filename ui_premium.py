@@ -2424,6 +2424,19 @@ def initialize_tutorial_state():
         st.session_state.tutorial_mode = "visible"
 
 
+def load_sample_incident(sample_description: str, target_mode: str = "Single Incident Lab"):
+    """Load a sample incident into the UI and navigate to the appropriate mode.
+    
+    Args:
+        sample_description: The incident description text to load
+        target_mode: The UI mode to switch to (default: Single Incident Lab)
+    """
+    st.session_state.sample_incident_text = sample_description
+    st.session_state.selected_mode = target_mode
+    st.session_state.radio_key_version = st.session_state.get("radio_key_version", 0) + 1
+    st.rerun()
+
+
 def show_tutorial_section():
     """Display the tutorial/getting started section in sidebar."""
     st.sidebar.markdown("---")
@@ -2456,10 +2469,7 @@ def show_tutorial_section():
                 use_container_width=True,
                 help=f"Category: {sample['category']}"
             ):
-                st.session_state.sample_incident_text = sample['description']
-                st.session_state.selected_mode = "Single Incident Lab"
-                st.session_state.radio_key_version = st.session_state.get("radio_key_version", 0) + 1
-                st.rerun()
+                load_sample_incident(sample['description'])
         
         # Mode descriptions
         st.markdown("### 📚 UI Mode Guide")
@@ -3460,8 +3470,12 @@ def single_incident_lab(
 
         # Check if sample incident was loaded from tutorial
         default_text = examples[example_type]
-        if "sample_incident_text" in st.session_state and st.session_state.sample_incident_text:
-            default_text = st.session_state.sample_incident_text
+        sample_text = st.session_state.get('sample_incident_text', '').strip()
+        if sample_text:
+            default_text = sample_text
+            # Clear sample from session state after using it once
+            # This ensures it loads into textarea but doesn't persist on future reruns
+            st.session_state.sample_incident_text = ''
 
         incident_text = st.text_area(
             "Incident Description",
@@ -3470,10 +3484,6 @@ def single_incident_lab(
             placeholder="Enter detailed incident description...",
             help="Describe the security incident in natural language. Try one of the sample incidents from the Getting Started tutorial!",
         )
-        
-        # Clear sample text after it's been used in the textarea
-        if "sample_incident_text" in st.session_state and st.session_state.sample_incident_text:
-            st.session_state.sample_incident_text = None
 
         col_btn1, col_btn2, col_btn3 = st.columns(3)
 
