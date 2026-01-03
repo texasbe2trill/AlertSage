@@ -2419,13 +2419,9 @@ def create_confidence_timeline(probabilities: dict):
 
 def initialize_tutorial_state():
     """Initialize tutorial-related session state variables."""
-    if "show_tutorial" not in st.session_state:
-        # Show tutorial by default for first-time users
-        st.session_state.show_tutorial = True
-    if "tutorial_dismissed" not in st.session_state:
-        st.session_state.tutorial_dismissed = False
-    if "dont_show_tutorial_again" not in st.session_state:
-        st.session_state.dont_show_tutorial_again = False
+    if "tutorial_mode" not in st.session_state:
+        # Tutorial mode: 'visible', 'hidden', or 'dismissed_permanently'
+        st.session_state.tutorial_mode = "visible"
 
 
 def show_tutorial_section():
@@ -2433,16 +2429,16 @@ def show_tutorial_section():
     st.sidebar.markdown("---")
     
     # Check if user has dismissed tutorial permanently
-    if st.session_state.get("dont_show_tutorial_again", False):
+    if st.session_state.get("tutorial_mode", "visible") == "dismissed_permanently":
         # Show a small button to re-enable tutorial
         if st.sidebar.button("💡 Show Tutorial", use_container_width=True):
-            st.session_state.show_tutorial = True
-            st.session_state.dont_show_tutorial_again = False
+            st.session_state.tutorial_mode = "visible"
             st.rerun()
         return
     
     # Tutorial toggle and section
-    with st.sidebar.expander("🎓 Getting Started Tutorial", expanded=st.session_state.get("show_tutorial", True)):
+    is_expanded = st.session_state.get("tutorial_mode", "visible") == "visible"
+    with st.sidebar.expander("🎓 Getting Started Tutorial", expanded=is_expanded):
         st.markdown("""
         **Welcome to AlertSage!** 👋
         
@@ -2451,7 +2447,7 @@ def show_tutorial_section():
         
         # Sample incidents section
         st.markdown("### 📝 Try These Sample Incidents")
-        st.markdown("Click to copy a sample incident for analysis:")
+        st.markdown("Click to load a sample incident for analysis:")
         
         for i, sample in enumerate(SAMPLE_INCIDENTS):
             if st.button(
@@ -2463,7 +2459,7 @@ def show_tutorial_section():
                 st.session_state.sample_incident_text = sample['description']
                 st.session_state.selected_mode = "Single Incident Lab"
                 st.session_state.radio_key_version = st.session_state.get("radio_key_version", 0) + 1
-                st.success(f"✓ Sample loaded! Switch to 'Single Incident Lab' to analyze.")
+                st.rerun()
         
         # Mode descriptions
         st.markdown("### 📚 UI Mode Guide")
@@ -2507,15 +2503,13 @@ def show_tutorial_section():
         st.markdown("---")
         dont_show = st.checkbox(
             "Don't show this tutorial again",
-            value=st.session_state.get("dont_show_tutorial_again", False),
+            value=False,
             key="tutorial_dont_show_checkbox"
         )
         
-        if dont_show != st.session_state.get("dont_show_tutorial_again", False):
-            st.session_state.dont_show_tutorial_again = dont_show
-            if dont_show:
-                st.session_state.show_tutorial = False
-                st.success("Tutorial hidden. You can re-enable it anytime using the '💡 Show Tutorial' button.")
+        if dont_show:
+            st.session_state.tutorial_mode = "dismissed_permanently"
+            st.success("Tutorial hidden. You can re-enable it anytime using the '💡 Show Tutorial' button.")
 
 
 # ============================================================================
@@ -3468,8 +3462,6 @@ def single_incident_lab(
         default_text = examples[example_type]
         if "sample_incident_text" in st.session_state and st.session_state.sample_incident_text:
             default_text = st.session_state.sample_incident_text
-            # Clear it after using once
-            st.session_state.sample_incident_text = None
 
         incident_text = st.text_area(
             "Incident Description",
@@ -3478,6 +3470,10 @@ def single_incident_lab(
             placeholder="Enter detailed incident description...",
             help="Describe the security incident in natural language. Try one of the sample incidents from the Getting Started tutorial!",
         )
+        
+        # Clear sample text after it's been used in the textarea
+        if "sample_incident_text" in st.session_state and st.session_state.sample_incident_text:
+            st.session_state.sample_incident_text = None
 
         col_btn1, col_btn2, col_btn3 = st.columns(3)
 
