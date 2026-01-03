@@ -149,6 +149,85 @@ _SECRETS_PATHS = [
 
 _CACHED_SECRETS: dict[str, Any] | None = None
 
+# ============================================================================
+# SAMPLE INCIDENTS FOR TUTORIAL
+# ============================================================================
+
+SAMPLE_INCIDENTS = [
+    {
+        "title": "Suspicious Email with Attachment",
+        "description": "User reported receiving an email from unknown sender claiming to be from IT department. Email contains a PDF attachment named 'urgent_password_reset.pdf' and requests immediate action to avoid account suspension. The sender email domain appears similar to company domain but with slight misspelling.",
+        "category": "Phishing",
+    },
+    {
+        "title": "Multiple Failed Login Attempts",
+        "description": "Security system detected 47 failed login attempts to admin account from IP address 185.220.101.45 within 10 minutes. Attempts used various common passwords and dictionary words. Source IP is located in foreign country with no business relationship. Account lockout triggered after threshold reached.",
+        "category": "Access Abuse",
+    },
+    {
+        "title": "Unusual Outbound Network Traffic",
+        "description": "Endpoint detection system flagged workstation communicating with external IP 192.0.2.100 on port 443. Large volume of encrypted data (2.5 GB) transferred over 3 hours during non-business hours. Destination IP associated with file sharing services not approved for company use. User claims no knowledge of transfer.",
+        "category": "Data Exfiltration",
+    },
+]
+
+# UI mode descriptions for tutorial
+UI_MODE_DESCRIPTIONS = {
+    "Intelligence Dashboard": {
+        "icon": "📊",
+        "short_desc": "Overview dashboard with metrics and recent activity",
+        "long_desc": "The Intelligence Dashboard provides a comprehensive overview of your security posture. View total incidents analyzed, recent trends, classification distributions, and quick access to bookmarks and history. Perfect for getting a high-level view of your security operations.",
+        "use_when": "Use this mode to monitor overall activity and access recent analyses",
+    },
+    "Single Incident Lab": {
+        "icon": "🔍",
+        "short_desc": "Analyze individual security incidents in detail",
+        "long_desc": "The Single Incident Lab allows you to analyze individual security incidents with comprehensive intelligence. Enter an incident description and get real-time classification, confidence scoring, MITRE ATT&CK mapping, threat intelligence, and SOC playbook recommendations.",
+        "use_when": "Use this mode to investigate and classify individual security events",
+    },
+    "Advanced Search": {
+        "icon": "🔎",
+        "short_desc": "Search through historical incident data",
+        "long_desc": "Advanced Search lets you query your incident database using flexible filters. Search by keywords, date ranges, classifications, confidence levels, and more. Useful for finding similar past incidents or tracking trends over time.",
+        "use_when": "Use this mode to find past incidents or analyze patterns",
+    },
+    "Batch Analysis": {
+        "icon": "📦",
+        "short_desc": "Process multiple incidents from uploaded files",
+        "long_desc": "Batch Analysis enables bulk processing of incidents from CSV or TXT files. Upload a file with multiple incidents and get comprehensive analytics, aggregate metrics, and export capabilities. Ideal for processing large volumes of security events efficiently.",
+        "use_when": "Use this mode to process many incidents at once from a file",
+    },
+    "Bookmarks & History": {
+        "icon": "⭐",
+        "short_desc": "Access saved incidents and analysis history",
+        "long_desc": "Bookmarks & History provides quick access to incidents you've saved for later review and your complete analysis history. Add notes, organize bookmarks, and track your investigation workflow over time.",
+        "use_when": "Use this mode to review saved incidents or past analyses",
+    },
+    "Experimental Lab": {
+        "icon": "🧪",
+        "short_desc": "Advanced features and experimental tools",
+        "long_desc": "The Experimental Lab offers cutting-edge features for research and advanced analysis. Includes text similarity analysis, incident clustering, model comparison, and synthetic data generation. Perfect for power users and security researchers.",
+        "use_when": "Use this mode for advanced research and experimental features",
+    },
+    "Settings & Profiles": {
+        "icon": "⚙️",
+        "short_desc": "Configure user profiles and preferences",
+        "long_desc": "Settings & Profiles allows you to create and manage user profiles with custom default settings. Configure your preferred difficulty level, confidence thresholds, LLM options, and visualization preferences for a personalized experience.",
+        "use_when": "Use this mode to customize your analysis preferences",
+    },
+}
+
+# Configuration option help text
+CONFIG_HELP_TEXT = {
+    "difficulty": "Controls the strictness of classification. Easy: 50% threshold, Medium: 60%, Hard: 75%, Expert: 85%. Higher difficulty requires more confidence before making a classification.",
+    "threshold": "Minimum confidence score (0.0-1.0) required for a classification to be considered certain. Predictions below this threshold are marked as 'uncertain'. Recommended: 0.5-0.7 for most use cases.",
+    "max_classes": "Number of top classification predictions to display. Shows the most likely incident types ranked by confidence. Useful for seeing alternative classifications.",
+    "preprocessing": "Enable text preprocessing including cleaning, normalization, and tokenization. Generally improves accuracy for noisy or unstructured text.",
+    "llm_second_opinion": "Enable AI-powered second opinion for uncertain cases. Provides alternative classification with detailed rationale. Requires LLM configuration and may increase processing time.",
+    "advanced_viz": "Enable enhanced visualizations including risk radar charts, confidence distributions, and MITRE technique heatmaps. Provides richer visual insights.",
+    "llm_debug": "Show detailed LLM prompts and responses for troubleshooting and understanding how the AI makes decisions.",
+}
+
 
 def _load_local_secrets() -> dict[str, Any]:
     """Load secrets from the first existing secrets.toml without using st.secrets."""
@@ -2334,6 +2413,112 @@ def create_confidence_timeline(probabilities: dict):
 
 
 # ============================================================================
+# TUTORIAL & WALKTHROUGH HELPERS
+# ============================================================================
+
+
+def initialize_tutorial_state():
+    """Initialize tutorial-related session state variables."""
+    if "show_tutorial" not in st.session_state:
+        # Show tutorial by default for first-time users
+        st.session_state.show_tutorial = True
+    if "tutorial_dismissed" not in st.session_state:
+        st.session_state.tutorial_dismissed = False
+    if "dont_show_tutorial_again" not in st.session_state:
+        st.session_state.dont_show_tutorial_again = False
+
+
+def show_tutorial_section():
+    """Display the tutorial/getting started section in sidebar."""
+    st.sidebar.markdown("---")
+    
+    # Check if user has dismissed tutorial permanently
+    if st.session_state.get("dont_show_tutorial_again", False):
+        # Show a small button to re-enable tutorial
+        if st.sidebar.button("💡 Show Tutorial", use_container_width=True):
+            st.session_state.show_tutorial = True
+            st.session_state.dont_show_tutorial_again = False
+            st.rerun()
+        return
+    
+    # Tutorial toggle and section
+    with st.sidebar.expander("🎓 Getting Started Tutorial", expanded=st.session_state.get("show_tutorial", True)):
+        st.markdown("""
+        **Welcome to AlertSage!** 👋
+        
+        This tutorial will help you get started with the platform.
+        """)
+        
+        # Sample incidents section
+        st.markdown("### 📝 Try These Sample Incidents")
+        st.markdown("Click to copy a sample incident for analysis:")
+        
+        for i, sample in enumerate(SAMPLE_INCIDENTS):
+            if st.button(
+                f"{sample['title']}", 
+                key=f"sample_incident_{i}",
+                use_container_width=True,
+                help=f"Category: {sample['category']}"
+            ):
+                st.session_state.sample_incident_text = sample['description']
+                st.session_state.selected_mode = "Single Incident Lab"
+                st.session_state.radio_key_version = st.session_state.get("radio_key_version", 0) + 1
+                st.success(f"✓ Sample loaded! Switch to 'Single Incident Lab' to analyze.")
+        
+        # Mode descriptions
+        st.markdown("### 📚 UI Mode Guide")
+        current_mode = st.session_state.get("selected_mode", "Intelligence Dashboard")
+        
+        # Show description for current mode
+        if current_mode in UI_MODE_DESCRIPTIONS:
+            mode_info = UI_MODE_DESCRIPTIONS[current_mode]
+            st.info(f"""
+**{mode_info['icon']} {current_mode}**
+
+{mode_info['long_desc']}
+
+**When to use:** {mode_info['use_when']}
+            """)
+        
+        # Show all modes in expandable section
+        with st.expander("View All Modes"):
+            for mode_name, mode_info in UI_MODE_DESCRIPTIONS.items():
+                st.markdown(f"""
+**{mode_info['icon']} {mode_name}**  
+{mode_info['short_desc']}
+                """)
+        
+        # Configuration help
+        st.markdown("### ⚙️ Configuration Tips")
+        with st.expander("Understanding Settings"):
+            st.markdown(f"""
+**Difficulty Level:** {CONFIG_HELP_TEXT['difficulty']}
+
+**Confidence Threshold:** {CONFIG_HELP_TEXT['threshold']}
+
+**Max Classes:** {CONFIG_HELP_TEXT['max_classes']}
+
+**LLM Enhancement:** {CONFIG_HELP_TEXT['llm_second_opinion']}
+
+**Advanced Visualizations:** {CONFIG_HELP_TEXT['advanced_viz']}
+            """)
+        
+        # Don't show again checkbox
+        st.markdown("---")
+        dont_show = st.checkbox(
+            "Don't show this tutorial again",
+            value=st.session_state.get("dont_show_tutorial_again", False),
+            key="tutorial_dont_show_checkbox"
+        )
+        
+        if dont_show != st.session_state.get("dont_show_tutorial_again", False):
+            st.session_state.dont_show_tutorial_again = dont_show
+            if dont_show:
+                st.session_state.show_tutorial = False
+                st.success("Tutorial hidden. You can re-enable it anytime using the '💡 Show Tutorial' button.")
+
+
+# ============================================================================
 # SIDEBAR
 # ============================================================================
 
@@ -2395,6 +2580,9 @@ def create_sidebar():
             pass
 
     st.sidebar.markdown("## Settings")
+
+    # Initialize tutorial state
+    initialize_tutorial_state()
 
     # Theme: fixed to light for maximum readability (dark mode disabled)
     st.session_state.theme_mode = "Light"
@@ -2486,7 +2674,7 @@ def create_sidebar():
         "Difficulty Level",
         options=["Easy", "Medium", "Hard", "Expert"],
         value=default_difficulty,
-        help="Profile default applied" if active_profile else None,
+        help=CONFIG_HELP_TEXT['difficulty'] if not active_profile else "Profile default applied",
     )
 
     threshold = st.sidebar.slider(
@@ -2495,7 +2683,7 @@ def create_sidebar():
         1.0,
         default_threshold,
         0.05,
-        help="Profile default applied" if active_profile else None,
+        help=CONFIG_HELP_TEXT['threshold'] if not active_profile else "Profile default applied",
     )
 
     max_classes = st.sidebar.slider(
@@ -2503,18 +2691,22 @@ def create_sidebar():
         1,
         10,
         default_max_classes,
-        help="Profile default applied" if active_profile else None,
+        help=CONFIG_HELP_TEXT['max_classes'] if not active_profile else "Profile default applied",
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Advanced Options")
 
-    use_preprocessing = st.sidebar.checkbox("Text Preprocessing", value=True)
+    use_preprocessing = st.sidebar.checkbox(
+        "Text Preprocessing", 
+        value=True,
+        help=CONFIG_HELP_TEXT['preprocessing']
+    )
     # Use profile-versioned key to force checkbox refresh when profile changes
     use_llm = st.sidebar.checkbox(
         "LLM Enhancement",
         value=default_use_llm,
-        help="Profile default applied" if active_profile else None,
+        help=CONFIG_HELP_TEXT['llm_second_opinion'] if not active_profile else "Profile default applied",
         key=f"llm_checkbox_p{profile_id or 0}",
     )
 
@@ -2595,9 +2787,12 @@ def create_sidebar():
     enable_viz = st.sidebar.checkbox(
         "Advanced Visualizations",
         value=default_enable_viz,
-        help="Profile default applied" if active_profile else None,
+        help=CONFIG_HELP_TEXT['advanced_viz'] if not active_profile else "Profile default applied",
         key=f"viz_checkbox_p{profile_id or 0}",
     )
+
+    # Show tutorial section
+    show_tutorial_section()
 
     # Bookmarks Quick Access
     st.sidebar.markdown("---")
@@ -3269,12 +3464,19 @@ def single_incident_lab(
     with col1:
         example_type = st.selectbox("Load Example", list(examples.keys()))
 
+        # Check if sample incident was loaded from tutorial
+        default_text = examples[example_type]
+        if "sample_incident_text" in st.session_state and st.session_state.sample_incident_text:
+            default_text = st.session_state.sample_incident_text
+            # Clear it after using once
+            st.session_state.sample_incident_text = None
+
         incident_text = st.text_area(
             "Incident Description",
-            value=examples[example_type],
+            value=default_text,
             height=180,
             placeholder="Enter detailed incident description...",
-            help="Describe the security incident in natural language",
+            help="Describe the security incident in natural language. Try one of the sample incidents from the Getting Started tutorial!",
         )
 
         col_btn1, col_btn2, col_btn3 = st.columns(3)

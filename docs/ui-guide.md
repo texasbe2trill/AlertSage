@@ -40,11 +40,54 @@ Before using the UI, ensure you have:
 2. ✅ Model files downloaded (run `pytest tests/test_model.py -v` to trigger automatic download)
 3. ✅ (Optional) LLM model for second opinions: Download Llama-2-7B-Chat GGUF
 
+### Interactive Tutorial Walkthrough
+
+When you first launch AlertSage, you'll see an **interactive tutorial** in the sidebar to help you get started:
+
+#### 🎓 Tutorial Features
+
+1. **Sample Incidents** - Try 3 pre-written security incidents:
+   - **Suspicious Email with Attachment**: A phishing scenario with detailed indicators
+   - **Multiple Failed Login Attempts**: Access abuse detection example
+   - **Unusual Outbound Network Traffic**: Data exfiltration case study
+
+2. **UI Mode Descriptions** - Learn about each analysis mode:
+   - **Intelligence Dashboard**: Overview of security metrics and recent activity
+   - **Single Incident Lab**: Analyze individual incidents in detail
+   - **Advanced Search**: Query historical incident data
+   - **Batch Analysis**: Process multiple incidents from files
+   - **Bookmarks & History**: Access saved analyses
+   - **Experimental Lab**: Advanced research features
+   - **Settings & Profiles**: Customize preferences
+
+3. **Configuration Help** - Understand key settings:
+   - **Difficulty Level**: Controls classification strictness (Easy: 50%, Medium: 60%, Hard: 75%, Expert: 85%)
+   - **Confidence Threshold**: Minimum score for certain predictions (recommended: 0.5-0.7)
+   - **Max Classes**: Number of top predictions to display
+   - **LLM Enhancement**: AI-powered second opinions for uncertain cases
+   - **Advanced Visualizations**: Enhanced charts and risk assessments
+
+4. **Tutorial Controls**:
+   - ✅ **"Don't show this tutorial again"** checkbox to hide tutorial for returning users
+   - 💡 **"Show Tutorial"** button to re-enable tutorial anytime
+
+#### Using Sample Incidents
+
+To try a sample incident:
+
+1. Open the **"🎓 Getting Started Tutorial"** expander in the sidebar
+2. Click any sample incident button (e.g., "Suspicious Email with Attachment")
+3. Switch to **"Single Incident Lab"** mode
+4. The sample incident text will be automatically loaded
+5. Click **"Analyze"** to see the classification results
+
+The tutorial is designed to work **without requiring any external data** - all samples are self-contained.
+
 ---
 
 ## 📋 Interface Modes
 
-The UI offers three primary analysis modes accessible from the sidebar:
+The UI offers seven primary analysis modes accessible from the sidebar:
 
 ### 🔍 Single Incident Analysis
 
