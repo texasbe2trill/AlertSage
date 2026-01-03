@@ -2420,7 +2420,7 @@ def create_confidence_timeline(probabilities: dict):
 def initialize_tutorial_state():
     """Initialize tutorial-related session state variables."""
     if "tutorial_mode" not in st.session_state:
-        # Tutorial mode: 'visible', 'hidden', or 'dismissed_permanently'
+        # Tutorial mode: 'visible' or 'dismissed_permanently'
         st.session_state.tutorial_mode = "visible"
 
 
@@ -3473,8 +3473,10 @@ def single_incident_lab(
         sample_text = st.session_state.get('sample_incident_text', '').strip()
         if sample_text:
             default_text = sample_text
-            # Clear sample from session state after using it once
-            # This ensures it loads into textarea but doesn't persist on future reruns
+            # Clear sample immediately after reading in this render cycle.
+            # Streamlit will use this value for textarea default, then clear it
+            # so it won't override the textarea on subsequent reruns.
+            # This is the correct pattern for one-time default values in Streamlit.
             st.session_state.sample_incident_text = ''
 
         incident_text = st.text_area(
