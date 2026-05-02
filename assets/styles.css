@@ -87,20 +87,26 @@ html, body, .stApp,
 
 /* Streamlit's top chrome.
  *
- * `stHeader` hosts the sidebar collapse/expand chevron, so we cannot
- * zero its height (doing so traps users on mobile when they dismiss
- * the sidebar; the chevron is the only way to bring it back).
- * Instead: make the header transparent so it visually disappears
- * against the page background, kill its shadow and bottom border,
- * and explicitly hide the share/deploy toolbar and the gradient
- * decoration strip that we actually want gone.
+ * Make the header transparent so it visually disappears against the
+ * page background, kill its shadow and bottom border, and hide the
+ * share/deploy toolbar plus the gradient decoration strip. Do NOT
+ * zero its height: that hides the in-sidebar collapse chevron and
+ * traps users on mobile.
  *
- * `stSidebarCollapseButton` is the chevron INSIDE the open sidebar.
- * `stSidebarCollapsedControl` is the floating restore button rendered
- * AT THE PAGE LEVEL when the sidebar is dismissed -- in Streamlit 1.39
- * this is the only way to bring the sidebar back, especially on mobile.
- * Forced visible with high z-index so no later panel can overlay them.
- * Tap target bumped to 44x44 on phones for a11y.
+ * Sidebar collapse anatomy in Streamlit 1.39:
+ *  - [data-testid="stSidebarCollapseButton"] is the chevron rendered
+ *    INSIDE the open sidebar. Used to dismiss it.
+ *  - [data-testid="stSidebarCollapsedControl"] is a position: fixed
+ *    floating restore button rendered AS A SIBLING of the sidebar
+ *    (always present in the DOM, anchored top-left of the viewport
+ *    via theme spacing). Streamlit relies on the open sidebar to
+ *    naturally cover it via stacking order; when the sidebar
+ *    translates offscreen, the floating control becomes visible.
+ *
+ * Important: do not raise this control's z-index, do not pin it
+ * with !important pointer-events / display rules. Doing so puts it
+ * on top of the open sidebar nav and eats nav-item clicks. Limit
+ * ourselves to surface theming and a11y tap-target sizing.
  */
 [data-testid="stHeader"] {
     background: transparent !important;
@@ -111,36 +117,22 @@ html, body, .stApp,
 [data-testid="stDecoration"] {
     display: none !important;
 }
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapsedControl"],
-button[kind="header"] {
-    visibility: visible !important;
-    opacity: 1 !important;
-    pointer-events: auto !important;
-    z-index: 1000 !important;
-}
 [data-testid="stSidebarCollapsedControl"] {
-    /* Floating restore button: keep it above the page chrome and
-     * tinted to match the SOC palette. */
-    display: flex !important;
-    background: var(--soc-surface) !important;
-    border: 1px solid var(--soc-border) !important;
-    color: var(--soc-text) !important;
-    border-radius: var(--soc-radius-sm) !important;
-    box-shadow: var(--soc-shadow-md) !important;
+    background: var(--soc-surface);
+    border: 1px solid var(--soc-border);
+    color: var(--soc-text);
+    border-radius: var(--soc-radius-sm);
+    box-shadow: var(--soc-shadow-md);
 }
-[data-testid="stSidebarCollapsedControl"] button,
 [data-testid="stSidebarCollapsedControl"] svg {
-    color: var(--soc-text) !important;
-    fill: currentColor !important;
+    color: var(--soc-text);
+    fill: currentColor;
 }
 @media (max-width: 768px) {
     [data-testid="stSidebarCollapseButton"],
-    [data-testid="stSidebarCollapsedControl"],
-    [data-testid="stSidebarCollapsedControl"] button,
-    button[kind="header"] {
-        min-width: 44px !important;
-        min-height: 44px !important;
+    [data-testid="stSidebarCollapsedControl"] button {
+        min-width: 44px;
+        min-height: 44px;
     }
 }
 
