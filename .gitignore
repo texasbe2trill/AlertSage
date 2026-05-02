@@ -218,3 +218,12 @@ models/X_train_tfidf.joblib
 models/y_test.joblib
 models/y_train.joblib
 notebooks/models/hybrid_pipeline.joblib
+
+# Local app database (written by the Streamlit UI on every triage run)
+data/triage.db
+data/triage.db-journal
+data/triage.db-wal
+data/triage.db-shm
+
+# Claude Code worktrees, prompts, and skill caches
+.claude/

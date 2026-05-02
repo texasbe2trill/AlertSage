@@ -1,0 +1,35 @@
+# Development, test, docs, and notebook dependencies.
+# Includes everything in requirements.txt plus tools used for local
+# development that are not needed by the deployed Streamlit app.
+
+-r requirements.txt
+
+# Testing
+pytest>=7
+pytest-cov>=4
+coverage>=7
+
+# Linting
+ruff
+
+# Local GGUF inference (the "Local (GGUF)" provider path).
+# Optional. Only required when running the Llama backend locally.
+llama-cpp-python==0.3.16
+
+# Notebooks (data exploration, training experiments)
+ipykernel
+ipython
+ipywidgets
+jupyter_client
+jupyter_core
+notebook
+
+# Docs site (MkDocs)
+mkdocs>=1.6
+mkdocs-material>=9
+mkdocs-material-extensions>=1.3
+mkdocs-minify-plugin>=0.8
+mkdocs-git-revision-date-localized-plugin>=1.5
+
+# Misc local dev tooling
+pyperclip

@@ -60,7 +60,7 @@ You should see a formatted output with classification results.
 ### Try the Streamlit UI
 
 ```bash
-streamlit run ui_premium.py
+streamlit run app.py
 ```
 
 Your browser will open to `http://localhost:8501` with an interactive dashboard.
@@ -101,7 +101,7 @@ Install Python 3.11+ from [python.org](https://www.python.org/downloads/) or use
 ### Port 8501 already in use (Streamlit)
 
 ```bash
-streamlit run ui_premium.py --server.port 8502
+streamlit run app.py --server.port 8502
 ```
 
 ## Quick Command Reference

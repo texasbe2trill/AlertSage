@@ -1,561 +1,199 @@
-# Streamlit UI Guide
+# SOC Console Guide
 
-!!! tip "Launch the UI"
-`bash
-    streamlit run ui_premium.py
-    `
-The UI will open in your browser at `http://localhost:8501`
+AlertSage ships with a Streamlit-based SOC console designed to feel like a
+production SIEM front-end (think Splunk Enterprise Security or Elastic
+Security): dark-mode-first, dense, severity as the primary color signal.
 
-## Overview
-
-The **NLP Cyber Incident Triage Laboratory** is a comprehensive Streamlit web application providing an interactive dashboard for security incident analysis. It combines real-time classification, visual analytics, threat intelligence, and SOC automation in a modern, user-friendly interface.
-
-![Screenshot: UI Overview](images/ui-overview.png)
-
-_Main interface showing the analysis dashboard_
-
----
-
-## 🚀 Getting Started
-
-### Launch the Application
-
-From the project root directory:
+## Launch
 
 ```bash
-# Activate virtual environment
-source .venv/bin/activate
-
-# Launch UI
-streamlit run ui_premium.py
+streamlit run app.py
 ```
 
-The interface will automatically open in your default browser at `http://localhost:8501`.
+The console opens at <http://localhost:8501>.
+
+## Layout
+
+The console is split into a sidebar and a main panel.
+
+The sidebar carries:
+
+- **Brand block** with the AlertSage wordmark and a `SOC console` tag.
+- **Navigate** rail with six pages: Overview, Investigate, Hunt, Batch,
+  Bookmarks, Settings.
+- **Triage** controls: confidence threshold, probability rows, text
+  preprocessing toggle, and the LLM second-opinion toggle.
+- **Provider** snapshot (one line summarizing the active LLM backend and
+  model).
+
+The top bar above the main panel shows the brand again, a centered UTC
+clock with the current page label, and a status strip on the right: a
+green dot when the classifier is loaded and a separate pill for the
+active LLM provider.
+
+## Pages
+
+### Overview
+
+The default landing page. Reads as a SOC mission control screen with six
+sections.
+
+1. **KPI strip.** Six tiles: total analyzed, critical-or-high count, last
+   24 hours, average classifier confidence, bookmarks, analyst notes.
+   Each tile carries a left-edge severity bar and a small trend line.
+2. **Events over time.** A 14-day stacked bar chart, one segment per
+   severity tier (critical, high, medium, low, info).
+3. **Classifier confidence histogram.** Twenty buckets across `[0, 1]`
+   with green / yellow / orange / red shading so an analyst can see
+   immediately whether the classifier is operating in its high-confidence
+   band.
+4. **Severity distribution.** Donut chart of the same data, grouped by
+   tier.
+5. **Threat intel feed.** Right-rail panel listing recent CISA, MS-ISAC,
+   Mandiant, OTX, and MSRC entries. Currently a static demo feed; the
+   data shape mirrors a TAXII collection so a real feed can drop in.
+6. **Live tail.** Auto-refreshing event stream that re-queries the
+   database every 5 seconds via `st.fragment`. New triage events appear
+   without a page reload.
+7. **MITRE ATT&CK coverage.** A tactic-by-technique heatmap built from
+   the labeled history. Cells scale from translucent indigo (low) to
+   saturated red (high).
+8. **Top classifications.** Distribution rows colored by the severity
+   tier the label maps to.
+9. **Recent events table.** Latest ten triage runs with mono ID column,
+   classification pill, status pill, confidence, anomaly score, and a
+   truncated narrative.
+
+### Investigate
+
+Triage one incident end to end. The page is organized into:
+
+- **Examples** column. One-click sample narratives (phishing, data
+  exfiltration, malware, access abuse, web attack, benign activity).
+- **Narrative** textarea. Free-form text; the classifier preprocesses
+  internally.
+- **Triage** button. Runs the TF-IDF + LogReg classifier and, when
+  enabled, the LLM second opinion.
+
+After triage the result panel renders top to bottom:
+
+- **Event head.** Mono event id (`AS-000123`), classifier and LLM timing
+  badges, severity pill, confidence pill, anomaly score, uncertainty
+  badge.
+- **Case status stepper.** Four-stage workflow: New, Triaging, Contained,
+  Closed. Click the next-stage button to advance; status persists across
+  reloads via the application database.
+- **MITRE ATT&CK kill chain.** Horizontal flow of all 13 enterprise
+  tactics. Tactics whose techniques the classifier surfaced light up in
+  indigo with the matching technique IDs as monospace chips.
+- **Indicators and enrichment.** Auto-extracted IOCs (IPv4, IPv6, MD5,
+  SHA1, SHA256, URL, email, domain, CVE, hostname). Each indicator gets a
+  mocked verdict (`clean` / `unknown` / `suspicious` / `malicious`),
+  reputation score, first-seen estimate, and source list. The shape
+  matches an aggregated VirusTotal / AbuseIPDB / OTX response.
+- **Class probabilities.** Top N candidate classes (set by the sidebar
+  slider) with severity-colored progress bars.
+- **MITRE techniques.** Mapped technique IDs as monospace chips.
+- **Analyst rationale.** LLM-authored or rule-based fallback narrative
+  with severity-toned left border.
+- **Playbook hint.** Recommended queue, priority, and a checkbox-style
+  action list.
+
+Footer actions: bookmark, add note, re-run.
+
+### Hunt
+
+Full-text search across triage history with filters:
+
+- Free-text query against the narrative.
+- Classification multiselect.
+- Severity multiselect.
+- Minimum confidence slider.
+- Minimum anomaly-score slider.
+- Time window selector (last hour, 24 hours, 7 days, 30 days, all time).
 
-### First-Time Setup
+Results render as the same SOC table used on Overview. Up to 200 matches
+are shown per render.
 
-Before using the UI, ensure you have:
+### Batch
 
-1. ✅ Installed all dependencies: `pip install -e .`
-2. ✅ Model files downloaded (run `pytest tests/test_model.py -v` to trigger automatic download)
-3. ✅ (Optional) LLM model for second opinions: Download Llama-2-7B-Chat GGUF
+CSV upload that triages many events at once. The console auto-detects the
+text column from a fixed list (`incident_text`, `description`,
+`narrative`, `alert`, `text`). Up to 500 rows per batch.
 
----
+After processing:
 
-## 📋 Interface Modes
+- **KPI strip.** Processed count, critical-and-high count, medium count,
+  benign-or-unknown count, plus wall-clock elapsed time.
+- **Distribution panel.** Per-label event counts with severity bars.
+- **MITRE coverage.** Tactic-by-tactic coverage bars, plus a detailed
+  expander showing every (tactic, technique, label) cell with severity
+  breakdown.
+- **Exports.** Three download buttons: triage results CSV,
+  MITRE coverage CSV, tactic rollup CSV (executive summary, one row per
+  tactic).
 
-The UI offers three primary analysis modes accessible from the sidebar:
+### Bookmarks
 
-### 🔍 Single Incident Analysis
+Saved investigations. Each entry expands to show the severity pill, the
+current case status, the narrative quote (severity-toned), the four-step
+case status stepper with advance buttons, and any analyst note.
 
-Analyze individual security incidents with comprehensive intelligence.
+### Settings
 
-![Screenshot: Single Incident Mode](images/ui-single-incident.png)
+LLM provider configuration plus triage defaults.
 
-_Single incident analysis with real-time classification_
+- **Provider** radio: Local llama.cpp (only shown when the
+  `llama-cpp-python` package and a `.gguf` file in `models/` are both
+  present), Hugging Face Inference, OpenAI, Anthropic.
+- **Per-provider configuration** panel: model id text input and a
+  password-masked Bring Your Own Key field. **Keys live in session
+  state only and are never written to disk.**
+- **Triage defaults** sliders: confidence threshold, probability rows,
+  text-preprocessing toggle.
 
-**Features:**
+If you select OpenAI or Anthropic but leave the key blank, the
+dispatcher silently falls back to the Hugging Face demo (when an
+`HF_TOKEN` is available in environment or `.streamlit/secrets.toml`),
+so first-time visitors still get a working triage. The status caption
+in the sidebar shows the actually-active backend.
 
-- Real-time incident classification
-- Confidence scoring with visual gauge
-- Probability distribution charts
-- MITRE ATT&CK technique mapping
-- Threat intelligence panel
-- SOC playbook recommendations
-- Risk radar visualization
+## Provider configuration
 
-**Workflow:**
+Three ways to set credentials, in order of precedence:
 
-1. Enter incident description in the text area
-2. Configure analysis settings in sidebar (threshold, difficulty, LLM)
-3. Click "🔍 Analyze Incident"
-4. Explore results across five analysis tabs
+1. Sidebar / Settings BYOK fields (session only, in-memory).
+2. `~/.streamlit/secrets.toml` or `<repo>/.streamlit/secrets.toml`
+   with keys `HF_TOKEN`, `HF_MODEL`.
+3. Environment variables: `TRIAGE_HF_TOKEN`, `TRIAGE_HF_MODEL`,
+   `HF_TOKEN`, `HF_MODEL`.
 
-### 📊 Bulk Analysis Intelligence Center
+OpenAI and Anthropic keys are session-only by design.
 
-Process multiple incidents from uploaded files with advanced analytics.
+## Privacy
 
-![Screenshot: Bulk Analysis Mode](images/ui-bulk-analysis.png)
+API keys are never persisted to `data/triage.db` or anywhere else on
+disk. The Settings panel "Apply" action writes to `st.session_state`
+keys only. The local TOML loader bypasses `st.secrets` so a missing
+secrets file does not surface a UI toast on every read.
 
-_Bulk processing dashboard with aggregate metrics_
+## Data lifecycle
 
-**Features:**
+Every triage run writes a row to `data/triage.db` with the narrative,
+final label, max probability, uncertainty band, and a JSON blob of the
+top-N probabilities, MITRE techniques, optional LLM opinion, and timing
+breakdown. Bookmarks, notes, and case status are stored in the same
+database via `db.save_setting` (case status is keyed by analysis id).
 
-- CSV/TXT file upload support
-- Batch processing with progress tracking
-- Aggregate statistics and metrics
-- LLM upgrade tracking (shows when AI changes classifications)
-- Interactive filtering by label, confidence, uncertainty
-- Export results as CSV/JSON
-- Comprehensive threat intelligence briefs
+The database file is gitignored. Delete it any time to reset the
+console; the schema rebuilds on next launch.
 
-**Workflow:**
+## Customizing
 
-1. Upload incidents file (CSV with `description` column or TXT with one incident per line)
-2. Configure batch processing settings
-3. Monitor real-time progress
-4. Review aggregate analytics
-5. Filter and export results
-
-### 🧪 Experimental Lab
-
-Advanced features for research and experimentation.
-
-![Screenshot: Experimental Lab](images/ui-experimental.png)
-_Experimental analysis tools_
-
-**Features:**
-
-- Text similarity analysis
-- Incident clustering
-- Model performance comparison
-- Synthetic data generation
-- Advanced feature extraction
-- IOC lookup and threat feeds
-
----
-
-## 🎛️ Sidebar Configuration
-
-The sidebar provides comprehensive control over analysis parameters:
-
-![Screenshot: Sidebar Settings](images/ui-sidebar.png)
-
-_Configuration panel with all analysis settings_
-
-### Analysis Settings
-
-**Difficulty Mode**
-
-- `default` - Standard thresholds (50% confidence)
-- `soc-medium` - Moderate strictness (60% confidence)
-- `soc-hard` - Maximum strictness (75% confidence)
-
-**Confidence Threshold**
-
-- Slider: 0.0 to 1.0
-- Default: 0.50
-- Controls when predictions are marked "uncertain"
-
-**Max Classes**
-
-- Number of top predictions to display
-- Range: 1-7
-- Useful for exploring runner-up classifications
-
-### LLM Configuration
-
-**Enable LLM Second Opinion**
-
-- Toggle AI-assisted classification
-- Engages automatically for uncertain cases
-- Provides alternative perspective with rationale
-
-**Debug Mode**
-
-- Shows detailed LLM prompts and responses
-- Useful for troubleshooting
-- Performance analysis
-
-### Visualization Options
-
-**Advanced Visualizations**
-
-- Enable enhanced charts and graphs
-- Risk radar charts
-- Confidence distributions
-- MITRE technique heatmaps
-
----
-
-## 📊 Analysis Tabs (Single Incident)
-
-### Tab 1: 🎯 Analysis
-
-Core classification results with key metrics.
-
-![Screenshot: Analysis Tab](images/ui-tab-analysis.png)
-_Main analysis results with confidence metrics_
-
-**Displays:**
-
-- Final classification label
-- Confidence score with gauge visualization
-- Uncertainty level indicator
-- Top-N probability distribution
-- Class probability pie chart
-
-### Tab 2: 📊 Visualizations
-
-Interactive charts and visual analytics.
-
-![Screenshot: Visualizations Tab](images/ui-tab-visualizations.png)
-_Visual analytics dashboard_
-
-**Charts:**
-
-- Confidence gauge (speedometer-style)
-- Probability distribution (pie chart)
-- Risk radar (multi-dimensional assessment)
-- Text complexity metrics
-
-### Tab 3: 🕵️ Threat Intel
-
-Comprehensive threat intelligence analysis.
-
-![Screenshot: Threat Intel Tab](images/ui-tab-threat-intel.png)
-_Threat intelligence panel with IOC extraction_
-
-**Features:**
-
-- MITRE ATT&CK technique mapping
-- IOC extraction (IPs, URLs, emails)
-- Attack sophistication scoring
-- Threat landscape context
-- Related campaigns/TTPs
-
-### Tab 4: 📋 SOC Playbook
-
-Context-aware incident response recommendations.
-
-![Screenshot: Playbook Tab](images/ui-tab-playbook.png)
-_SOC playbook with actionable recommendations_
-
-**Provides:**
-
-- Incident priority (P1-P5)
-- Response timeline
-- Step-by-step actions
-- Context-specific guidance
-- Escalation paths
-
-### Tab 5: 🔧 Technical Details
-
-Raw data and technical information.
-
-![Screenshot: Technical Details Tab](images/ui-tab-technical.png)
-_Technical debugging and raw JSON output_
-
-**Includes:**
-
-- Full JSON response
-- Text complexity analysis
-- Model metadata
-- Debug information
-- LLM prompts/responses (if enabled)
-
----
-
-## 📈 Bulk Analysis Features
-
-### Upload & Processing
-
-**Supported Formats:**
-
-**CSV:**
-
-```csv
-description
-"User reported suspicious email with attachment"
-"Multiple failed login attempts from Asia"
-"Unusual outbound traffic to 192.168.1.100"
-```
-
-**TXT (one incident per line):**
-
-```
-User reported suspicious email with attachment
-Multiple failed login attempts from Asia
-Unusual outbound traffic to 192.168.1.100
-```
-
-**Processing:**
-
-- Real-time progress bar
-- Estimated time remaining
-- Incident counter
-- Error handling with retry logic
-
-![Screenshot: Bulk Upload](images/ui-bulk-upload.png)
-_File upload and processing interface_
-
-### Results Dashboard
-
-After processing completes, view comprehensive analytics:
-
-![Screenshot: Bulk Results](images/ui-bulk-results.png)
-_Aggregate results with filtering and export_
-
-**Metrics:**
-
-- Total incidents processed
-- Label distribution
-- Average confidence
-- LLM-resolved count (when second opinion used)
-- Uncertain case count
-
-**Interactive Table:**
-
-- Sortable columns
-- Filterable by label, confidence, uncertainty
-- Expandable rows for full incident text
-- Color-coded by risk level
-
-### Advanced Analytics
-
-Access four analytics dashboards:
-
-**📈 Overview**
-
-- Label distribution pie chart
-- Confidence histogram
-- Timeline analysis
-- MITRE technique frequency
-
-**🎯 Confidence Analysis**
-
-- Confidence vs label scatter plot
-- Uncertainty distribution
-- High/low confidence breakdown
-- Threshold impact analysis
-
-**⚡ Performance**
-
-- Processing speed metrics
-- Model inference time
-- LLM overhead analysis
-- Resource utilization
-
-**🔬 Deep Dive**
-
-- Text complexity analysis
-- N-gram frequency
-- IOC extraction summary
-- Correlation matrices
-
-![Screenshot: Advanced Analytics](images/ui-bulk-analytics.png)
-_Advanced analytics with multiple visualization panels_
-
-### Export Options
-
-Download results in multiple formats:
-
-**CSV Export:**
-
-```csv
-description,label,confidence,display_label,llm_override,mitre_techniques
-"...",phishing,0.87,phishing,No,"T1566.001,T1204.002"
-```
-
-**JSON Export:**
-
-```json
-{
-  "description": "...",
-  "label": "phishing",
-  "confidence": 0.87,
-  "display_label": "phishing",
-  "llm_second_opinion": {...},
-  "probabilities": {...},
-  "mitre_techniques": ["T1566.001"]
-}
-```
-
-**Threat Intelligence Brief:**
-
-- Executive summary (Markdown/PDF)
-- MITRE coverage report
-- Critical incidents highlight
-- Strategic recommendations
-
----
-
-## 🧪 Experimental Lab Tools
-
-### Text Similarity Analysis
-
-Compare incidents and find similar patterns.
-
-![Screenshot: Similarity Analysis](images/ui-similarity.png)
-_Text similarity clustering visualization_
-
-**Methods:**
-
-- TF-IDF cosine similarity
-- Semantic embeddings
-- Clustering (K-means, DBSCAN)
-- Similarity heatmaps
-
-### Model Comparison
-
-Benchmark different classifiers.
-
-**Models:**
-
-- Logistic Regression (baseline)
-- Random Forest
-- Linear SVM
-- Ensemble methods
-
-**Metrics:**
-
-- Accuracy comparison
-- Confusion matrices
-- Per-class performance
-- Feature importance
-
-### Synthetic Data Generation
-
-Create test datasets on-demand.
-
-**Parameters:**
-
-- Incident type
-- Complexity level
-- Batch size
-- Include IOCs/MITRE/timestamps
-- Export format
-
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-The UI respects the same environment variables as the CLI:
-
-```bash
-# LLM Configuration
-export TRIAGE_LLM_MODEL=/path/to/llama-2-7b-chat.Q5_K_S.gguf
-export TRIAGE_LLM_DEBUG=1
-export NLP_TRIAGE_LLM_TEMPERATURE=0.2
-export NLP_TRIAGE_LLM_MAX_TOKENS=512
-
-# Model Paths
-export TRIAGE_LLM_CTX=4096
-```
-
-See [Configuration Guide](configuration.md) for complete settings.
-
-### Custom Styling
-
-Modify `ui_premium.py` to customize the interface:
-
-**Color Schemes:**
-
-```python
-# Located at top of ui_premium.py
-.metric-card {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    ...
-}
-```
-
-**Chart Types:**
-
-- Plotly graph configurations
-- Streamlit theme settings
-- Layout adjustments
-
----
-
-## 💡 Tips & Best Practices
-
-### Performance Optimization
-
-✅ **Use baseline first** - Test without LLM for 10-20x faster processing  
-✅ **Batch processing** - Process multiple incidents in bulk mode  
-✅ **Adjust max classes** - Limit to 3-5 for faster rendering  
-✅ **Cache results** - Export and reload rather than re-analyzing
-
-### Accuracy Improvements
-
-✅ **Tune thresholds** - Lower (0.3-0.4) for coverage, higher (0.6-0.7) for precision  
-✅ **Use difficulty modes** - `soc-hard` for critical infrastructure  
-✅ **Enable LLM selectively** - Only for uncertain/high-stakes cases  
-✅ **Review uncertain** - Manual analysis for low-confidence predictions
-
-### Workflow Recommendations
-
-✅ **Single → Bulk** - Test single incidents first, then scale to bulk  
-✅ **Export everything** - Save results for audit trails  
-✅ **Use playbooks** - Follow SOC recommendations systematically  
-✅ **Monitor metrics** - Track confidence trends over time
-
-### What to Avoid
-
-❌ **Don't trust blindly** - Always review uncertain predictions  
-❌ **Don't over-rely on LLM** - It's decision support, not ground truth  
-❌ **Don't ignore confidence** - Low scores = unreliable classifications  
-❌ **Don't skip validation** - Verify results against ground truth when available
-
----
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**"Model files not found"**
-
-```bash
-# Trigger automatic download
-pytest tests/test_model.py -v
-```
-
-**Slow LLM processing**
-
-- Use quantized models (Q5_K_S recommended)
-- Enable GPU acceleration via llama-cpp-python
-- Reduce context window: `export TRIAGE_LLM_CTX=2048`
-- Lower temperature for faster generation
-
-**CSV upload fails**
-
-- Ensure `description` column exists
-- Check UTF-8 encoding
-- Remove empty rows
-- Verify proper CSV delimiter (comma)
-
-**UI crashes or freezes**
-
-- Check terminal output for errors
-- Verify sufficient RAM (8GB+ recommended)
-- Close other applications
-- Reduce LLM context window if OOM
-
-**Blank visualizations**
-
-- Enable "Advanced Visualizations" in sidebar
-- Check browser console for JavaScript errors
-- Refresh page
-- Try different browser (Chrome/Firefox recommended)
-
-### Debug Mode
-
-Enable detailed logging:
-
-```bash
-export TRIAGE_LLM_DEBUG=1
-streamlit run ui_premium.py
-```
-
-Check terminal output for:
-
-- LLM prompts and responses
-- Model loading status
-- Processing errors
-- Performance metrics
-
----
-
-## 🔗 Related Documentation
-
-- [CLI Usage](cli.md) - Command-line interface guide
-- [LLM Integration](llm-integration.md) - Setting up local LLM models
-- [Configuration](configuration.md) - Environment variables and settings
-- [API Reference](api-reference.md) - Programmatic access
-- [Architecture](architecture.md) - System design and components
-
----
-
-**Need help?** Open an issue on [GitHub](https://github.com/texasbe2trill/AlertSage/issues) or check the [FAQ](faq.md).
+All styling lives in `assets/styles.css` and is loaded once at module
+import. Tokens at the top of the file (`--soc-bg`, `--soc-accent`,
+severity tiers) drive every panel; change one variable to retheme the
+whole console. The Python side (`app.py`) is the router and view
+layer; primitive helpers like `render_kpi`, `severity_pill`,
+`render_case_stepper`, and `render_kill_chain` are reusable across
+pages.

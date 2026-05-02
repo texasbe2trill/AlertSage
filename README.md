@@ -176,9 +176,9 @@ pytest --cov=src/triage --cov-report=term-missing
 
 ### 3) Use the UI
 ```bash
-streamlit run ui_premium.py
+streamlit run app.py
 # If 8501 is busy:
-streamlit run ui_premium.py --server.port 8502
+streamlit run app.py --server.port 8502
 ```
 
 ### 4) Use the CLI
@@ -259,7 +259,7 @@ export TRIAGE_LLM_MODEL="$(pwd)/models/Llama-3.1-8B-Instruct-Q6_K.gguf"  # or wh
 nlp-triage --llm-second-opinion "Server began encrypting shared folders."
 
 # Optional: Streamlit UI with LLM enabled (toggle in sidebar)
-streamlit run ui_premium.py
+streamlit run app.py
 
 # Debug/disable GPU
 export TRIAGE_LLM_DEBUG=1
@@ -375,7 +375,7 @@ See [docs/production-generation.md](docs/production-generation.md) for comprehen
 
 ## 🎨 Streamlit UI Features
 
-The interactive web interface (`ui_premium.py`) provides a comprehensive triage experience:
+The interactive web interface (`app.py`) provides a comprehensive triage experience:
 
 ### Single Incident Analysis
 

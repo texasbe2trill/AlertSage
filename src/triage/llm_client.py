@@ -5,7 +5,7 @@ import os
 import re
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -90,7 +90,7 @@ class RateLimiter:
         self._events: deque[datetime] = deque()
 
     def check(self) -> Tuple[bool, float]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         window_start = now - timedelta(seconds=self.window_seconds)
         while self._events and self._events[0] < window_start:
             self._events.popleft()
@@ -381,9 +381,191 @@ class LocalLLMClient:
             return {}
 
 
+SOC_SYSTEM_PROMPT = (
+    "You are assisting with SOC incident triage. Respond with a single "
+    "valid JSON object only, with keys 'label', 'mitre_ids', and "
+    "'rationale'. Do not include any prose outside the JSON object."
+)
+
+
+@dataclass
+class OpenAIClient:
+    """Minimal OpenAI Chat Completions client with rate limiting.
+
+    The user-supplied API key is read once and held in memory only; the
+    client is never serialized or persisted. The official `openai` SDK is
+    imported lazily so that the package is not loaded at module import
+    time on cold start.
+    """
+
+    api_key: str
+    model: str = "gpt-4o-mini"
+    timeout: int = 120
+    max_prompt_chars: int = 8000
+    max_new_tokens: int = 512
+    temperature: float = 0.05
+    rate_limiter: Optional[RateLimiter] = None
+
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            raise ValueError("OpenAIClient requires an API key")
+        if not self.model:
+            raise ValueError("OpenAIClient requires a model id")
+
+        try:
+            from openai import OpenAI  # type: ignore
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "The 'openai' package is not installed. Add it to "
+                "requirements.txt or install with `pip install openai`."
+            ) from exc
+
+        self._client = OpenAI(api_key=self.api_key, timeout=self.timeout)
+        _debug(f"Initialised OpenAI client for model='{self.model}'")
+
+    def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                _debug("OpenAI parse: failed to decode extracted JSON snippet")
+        _debug("OpenAI parse: no JSON found, returning empty dict")
+        return {}
+
+    def generate_json(self, prompt: str, *, max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        prompt_to_send = (
+            prompt if len(prompt) <= self.max_prompt_chars else prompt[: self.max_prompt_chars]
+        )
+        if len(prompt) > self.max_prompt_chars:
+            _debug(
+                f"Prompt truncated from {len(prompt)} to {len(prompt_to_send)} chars for OpenAI."
+            )
+
+        if self.rate_limiter:
+            allowed, retry_after = self.rate_limiter.check()
+            if not allowed:
+                raise RuntimeError(
+                    f"Rate limit exceeded: wait {retry_after:.0f}s before retrying OpenAI."
+                )
+
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": SOC_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_to_send},
+            ],
+            max_tokens=max_tokens or self.max_new_tokens,
+            temperature=self.temperature,
+            response_format={"type": "json_object"},
+        )
+
+        try:
+            content = response.choices[0].message.content or ""
+        except (AttributeError, IndexError):
+            _debug("OpenAI response had no usable content")
+            return {}
+
+        return self._parse_json_from_text(content)
+
+
+@dataclass
+class AnthropicClient:
+    """Minimal Anthropic Messages API client with rate limiting.
+
+    Like OpenAIClient, the API key is held in memory only and the
+    `anthropic` SDK is imported lazily.
+    """
+
+    api_key: str
+    model: str = "claude-haiku-4-5"
+    timeout: int = 120
+    max_prompt_chars: int = 8000
+    max_new_tokens: int = 512
+    temperature: float = 0.05
+    rate_limiter: Optional[RateLimiter] = None
+
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            raise ValueError("AnthropicClient requires an API key")
+        if not self.model:
+            raise ValueError("AnthropicClient requires a model id")
+
+        try:
+            from anthropic import Anthropic  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "The 'anthropic' package is not installed. Add it to "
+                "requirements.txt or install with `pip install anthropic`."
+            ) from exc
+
+        self._client = Anthropic(api_key=self.api_key, timeout=self.timeout)
+        _debug(f"Initialised Anthropic client for model='{self.model}'")
+
+    def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                _debug("Anthropic parse: failed to decode extracted JSON snippet")
+        _debug("Anthropic parse: no JSON found, returning empty dict")
+        return {}
+
+    def generate_json(self, prompt: str, *, max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        prompt_to_send = (
+            prompt if len(prompt) <= self.max_prompt_chars else prompt[: self.max_prompt_chars]
+        )
+        if len(prompt) > self.max_prompt_chars:
+            _debug(
+                f"Prompt truncated from {len(prompt)} to {len(prompt_to_send)} chars for Anthropic."
+            )
+
+        if self.rate_limiter:
+            allowed, retry_after = self.rate_limiter.check()
+            if not allowed:
+                raise RuntimeError(
+                    f"Rate limit exceeded: wait {retry_after:.0f}s before retrying Anthropic."
+                )
+
+        response = self._client.messages.create(
+            model=self.model,
+            system=SOC_SYSTEM_PROMPT,
+            max_tokens=max_tokens or self.max_new_tokens,
+            temperature=self.temperature,
+            messages=[{"role": "user", "content": prompt_to_send}],
+        )
+
+        try:
+            blocks = response.content or []
+            text_parts = [
+                getattr(block, "text", "") for block in blocks
+                if getattr(block, "type", "") == "text"
+            ]
+            content = "".join(text_parts)
+        except (AttributeError, TypeError):
+            _debug("Anthropic response had no usable content")
+            return {}
+
+        return self._parse_json_from_text(content)
+
+
 __all__ = [
     "LocalLLMClient",
     "HuggingFaceInferenceClient",
+    "OpenAIClient",
+    "AnthropicClient",
     "RateLimiter",
     "resolve_hf_credentials",
+    "SOC_SYSTEM_PROMPT",
 ]

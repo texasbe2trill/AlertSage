@@ -174,7 +174,7 @@ python generator/generate_cyber_incidents.py --n-events 1000
 
 ```bash
 # Launch interactive interface
-streamlit run ui_premium.py
+streamlit run app.py
 ```
 
 ---
