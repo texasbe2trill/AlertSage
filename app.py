@@ -575,6 +575,53 @@ def severity_pill(label: str, *, fallback_text: str | None = None) -> str:
     return f'<span class="soc-pill {sev}">{text}</span>'
 
 
+def render_topbar(active_view: str) -> None:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    settings = _resolve_llm_settings()
+    provider = settings.get("provider", "local")
+    provider_label = {
+        "local": "Local llama.cpp",
+        "huggingface": "Hugging Face",
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+    }.get(provider, "Local")
+
+    page_meta = {
+        "overview": "Mission control",
+        "investigate": "Triage console",
+        "hunt": "Hunt and search",
+        "batch": "Batch processor",
+        "bookmarks": "Bookmarks",
+        "settings": "Configuration",
+    }.get(active_view, "")
+
+    logo_html = ""
+    if _LOGO_PATH.exists():
+        b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
+        logo_html = (
+            f'<img src="data:image/svg+xml;base64,{b64}" '
+            'style="height: 22px; width: auto;" alt="AlertSage" />'
+        )
+
+    st.markdown(
+        f"""
+        <div class="soc-topbar">
+            <div class="soc-topbar__brand">
+                {logo_html}
+                <span>AlertSage</span>
+                <span class="soc-topbar__brand-tag">SOC</span>
+            </div>
+            <div class="soc-topbar__center soc-mono">{page_meta}  ·  {now_iso}</div>
+            <div class="soc-topbar__status">
+                <span class="soc-status-pill"><span class="dot"></span>classifier ready</span>
+                <span class="soc-status-pill info"><span class="dot"></span>llm: {provider_label}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_page_header(
     title: str, subtitle: str, breadcrumb: str = "", action_html: str = ""
 ) -> None:
@@ -3783,6 +3830,7 @@ def main() -> None:
 
     render_sidebar()
     view = st.session_state.get("view", "overview")
+    render_topbar(view)
 
     # Demo data generator is mounted at the top level so synthetic events
     # stream regardless of which page the analyst is on. The fragment
