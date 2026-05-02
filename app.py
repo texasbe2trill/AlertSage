@@ -284,6 +284,19 @@ def local_gguf_available() -> bool:
 # SESSION-STATE BOOTSTRAP
 # =============================================================================
 
+# Hosted demo detection. Setting `IS_HOSTED_DEMO=1` (or any truthy
+# value) in Streamlit Community Cloud secrets / env flips the console
+# into demo-friendly defaults: auto-seed history on cold start, demo
+# generator on by default, slightly more chatty captions. Local runs
+# stay quiet.
+def _is_hosted_demo() -> bool:
+    if os.environ.get("IS_HOSTED_DEMO"):
+        return True
+    if os.environ.get("STREAMLIT_SHARING_MODE"):
+        return True
+    return False
+
+
 _DEFAULTS: dict[str, Any] = {
     "view": "overview",
     "selected_bookmark": None,
@@ -305,6 +318,9 @@ _DEFAULTS: dict[str, Any] = {
     "threshold": 0.50,
     "max_classes": 5,
     "use_preprocessing": True,
+    # Demo generator: on by default for the hosted demo so the live
+    # tail keeps moving for visitors. Off by default for local runs.
+    "demo_generator_on": _is_hosted_demo(),
 }
 for _key, _default in _DEFAULTS.items():
     if _key not in st.session_state:
@@ -1675,6 +1691,54 @@ def seed_historical_events(days: int = 30, count: int = 150) -> tuple[int, str |
             pass
 
     return inserted, None
+
+
+@st.cache_resource(show_spinner=False)
+def _auto_seed_marker() -> dict[str, bool]:
+    """Module-scoped marker that the auto-seeder has already run.
+
+    Cached as a resource so the seed only fires once per process.
+    Returns a dict so we can flip flags without invalidating the cache.
+    """
+    return {"seeded": False}
+
+
+def ensure_demo_data_seeded() -> None:
+    """Auto-seed synthetic data when the database is empty on cold start.
+
+    Runs at most once per process. Only fires when:
+      1. The history is empty (or nearly so), AND
+      2. We're either on the hosted demo OR the user just toggled the
+         demo generator on for the first time.
+
+    This is what makes a fresh deploy land on a populated dashboard
+    instead of an empty one. After this fires once, subsequent boots
+    find rows already there and skip.
+    """
+    marker = _auto_seed_marker()
+    if marker.get("seeded"):
+        return
+    # Only auto-seed on the hosted demo. Local runs stay unmolested
+    # unless the user explicitly hits "Backfill history" in Settings.
+    if not _is_hosted_demo():
+        marker["seeded"] = True
+        return
+    try:
+        history = _db().get_analysis_history(limit=5)
+        if len(history) >= 5:
+            marker["seeded"] = True
+            return
+        n, err = seed_historical_events(days=30, count=180)
+        marker["seeded"] = True
+        if err:
+            st.session_state[_DEMO_LAST_ERR_KEY] = f"auto-seed: {err}"
+        else:
+            st.session_state[_DEMO_COUNT_KEY] = (
+                int(st.session_state.get(_DEMO_COUNT_KEY, 0)) + n
+            )
+    except Exception as exc:
+        marker["seeded"] = True
+        st.session_state[_DEMO_LAST_ERR_KEY] = f"auto-seed: {exc}"
 
 
 def _clear_demo_events() -> int:
@@ -3760,6 +3824,10 @@ def _settings_panel_anthropic() -> None:
 # =============================================================================
 
 def main() -> None:
+    # First-cold-start auto-seed for the hosted demo. Idempotent and
+    # cached so this fires once per process at most.
+    ensure_demo_data_seeded()
+
     render_sidebar()
     view = st.session_state.get("view", "overview")
     render_topbar(view)

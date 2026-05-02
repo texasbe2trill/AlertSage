@@ -1,0 +1,28 @@
+# AlertSage SOC console Streamlit configuration.
+#
+# The file-watcher is disabled in production because Streamlit's default
+# watcher iterates every loaded module's `__path__` to know which files
+# to hot-reload. transformers (5.x) lazy-imports 80+ image-processor
+# submodules on `__path__` access, each of which tries to import
+# torchvision. AlertSage only uses text embeddings, so we don't ship
+# torchvision; the watcher then floods stderr with non-fatal cascading
+# ModuleNotFoundError stack traces.
+#
+# `fileWatcherType = "none"` skips the introspection loop entirely.
+# Streamlit Community Cloud restarts the app on a code push regardless,
+# so we're not losing reload behavior we'd actually use.
+
+[server]
+fileWatcherType = "none"
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = "stacktrace"
+toolbarMode = "minimal"
+
+[logger]
+level = "warning"

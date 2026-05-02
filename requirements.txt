@@ -11,9 +11,15 @@ pandas>=2.0
 numpy>=1.24,<3
 plotly>=5.22
 
-# ML inference
+# ML inference. transformers is pinned below 5.0 because 5.x ships 80+
+# image-processor submodules that lazy-import torchvision; on hosts
+# without torchvision (we don't need it for text embeddings) every
+# Streamlit module-path probe triggers a cascade of ModuleNotFoundError
+# stack traces in the deploy log. Pinning to 4.x avoids the cascade
+# without losing any functionality we use.
 scikit-learn>=1.3
-sentence-transformers>=3.0
+sentence-transformers>=3.0,<5
+transformers>=4.40,<5
 joblib>=1.3
 
 # HTTP and console formatting
