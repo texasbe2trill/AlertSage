@@ -95,10 +95,12 @@ html, body, .stApp,
  * and explicitly hide the share/deploy toolbar and the gradient
  * decoration strip that we actually want gone.
  *
- * `stSidebarCollapseButton` (Streamlit 1.30+) and `collapsedControl`
- * (older fallback) are the chevron and the floating restore button
- * respectively. Forced visible with high z-index so no later panel
- * can overlay them. Tap target bumped to 44x44 on phones for a11y.
+ * `stSidebarCollapseButton` is the chevron INSIDE the open sidebar.
+ * `stSidebarCollapsedControl` is the floating restore button rendered
+ * AT THE PAGE LEVEL when the sidebar is dismissed -- in Streamlit 1.39
+ * this is the only way to bring the sidebar back, especially on mobile.
+ * Forced visible with high z-index so no later panel can overlay them.
+ * Tap target bumped to 44x44 on phones for a11y.
  */
 [data-testid="stHeader"] {
     background: transparent !important;
@@ -110,25 +112,32 @@ html, body, .stApp,
     display: none !important;
 }
 [data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
 button[kind="header"] {
     visibility: visible !important;
     opacity: 1 !important;
     pointer-events: auto !important;
     z-index: 1000 !important;
 }
-[data-testid="collapsedControl"] {
+[data-testid="stSidebarCollapsedControl"] {
     /* Floating restore button: keep it above the page chrome and
      * tinted to match the SOC palette. */
+    display: flex !important;
     background: var(--soc-surface) !important;
     border: 1px solid var(--soc-border) !important;
     color: var(--soc-text) !important;
     border-radius: var(--soc-radius-sm) !important;
     box-shadow: var(--soc-shadow-md) !important;
 }
+[data-testid="stSidebarCollapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] svg {
+    color: var(--soc-text) !important;
+    fill: currentColor !important;
+}
 @media (max-width: 768px) {
     [data-testid="stSidebarCollapseButton"],
-    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] button,
     button[kind="header"] {
         min-width: 44px !important;
         min-height: 44px !important;
