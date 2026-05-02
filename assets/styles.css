@@ -128,7 +128,28 @@ html, body, .stApp,
     color: var(--soc-text);
     fill: currentColor;
 }
-@media (max-width: 768px) {
+/* Mobile and small tablets: the .soc-topbar renders inline at the top
+ * of the main content (y range roughly 16 to 101) and visually swallows
+ * the floating restore chevron, which Streamlit pins at top: 20px
+ * left: 24px. Even though z-index keeps the chevron on top in hit
+ * testing, dark-on-dark theming made it invisible against the topbar
+ * and finger taps on its edges occasionally landed on the topbar
+ * instead. Below 1100px (where the topbar is in its compact form):
+ *   - move the chevron below the topbar on the y axis so it lives in
+ *     unobstructed space.
+ *   - tint it with the accent color so it reads as a primary action
+ *     against the dark page background.
+ *   - bump tap target to 44x44 for a11y. */
+@media (max-width: 1100px) {
+    [data-testid="stSidebarCollapsedControl"] {
+        top: 110px !important;
+        background: var(--soc-accent) !important;
+        border-color: var(--soc-accent) !important;
+        color: var(--soc-accent-on) !important;
+    }
+    [data-testid="stSidebarCollapsedControl"] svg {
+        color: var(--soc-accent-on);
+    }
     [data-testid="stSidebarCollapseButton"],
     [data-testid="stSidebarCollapsedControl"] button {
         min-width: 44px;
