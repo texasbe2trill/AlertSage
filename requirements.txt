@@ -3,7 +3,13 @@
 # For local dev, tests, docs, and notebooks: pip install -r requirements-dev.txt
 
 # Web UI
-streamlit>=1.39
+# Pinned to the 1.39.x series. Cloud was previously installing 1.57.0
+# because the prior `>=1.39` floor had no upper bound, and 1.57's sidebar
+# and fragment internals differ enough from 1.39 that the auto-mounted
+# demo generator fragment plus auto-seed combination broke sidebar
+# rendering on the hosted deploy. Lock until we explicitly validate a
+# newer version end to end.
+streamlit>=1.39,<1.40
 streamlit-ace>=0.1.1
 
 # Data and visualization

@@ -318,9 +318,14 @@ _DEFAULTS: dict[str, Any] = {
     "threshold": 0.50,
     "max_classes": 5,
     "use_preprocessing": True,
-    # Demo generator: on by default for the hosted demo so the live
-    # tail keeps moving for visitors. Off by default for local runs.
-    "demo_generator_on": _is_hosted_demo(),
+    # Demo generator: off by default everywhere. Was previously on for
+    # the hosted demo, but that auto-mounted an every-8s rerun fragment
+    # which interacted badly with sidebar rendering on newer Streamlit
+    # versions during Cloud cold start. Visitors still land on a
+    # populated dashboard (ensure_demo_data_seeded handles that on cold
+    # start). The live tail just stops growing automatically; users who
+    # want it can toggle it in Settings.
+    "demo_generator_on": False,
 }
 for _key, _default in _DEFAULTS.items():
     if _key not in st.session_state:
@@ -3777,18 +3782,29 @@ def _settings_panel_anthropic() -> None:
 # =============================================================================
 
 def main() -> None:
-    # First-cold-start auto-seed for the hosted demo. Idempotent and
-    # cached so this fires once per process at most.
-    ensure_demo_data_seeded()
-
+    # Render the sidebar FIRST so navigation paints before any work that
+    # could delay first paint. Previously ensure_demo_data_seeded ran up
+    # top and on Streamlit Cloud (with IS_HOSTED_DEMO=1) the synchronous
+    # batch insert plus the auto-mounted fragment rerun storm during
+    # cold start broke sidebar visibility entirely. Sidebar now always
+    # renders, and seed/fragment work happens after the user already has
+    # navigation chrome.
     render_sidebar()
     view = st.session_state.get("view", "overview")
 
-    # Demo data generator is mounted at the top level so synthetic events
-    # stream regardless of which page the analyst is on. The fragment
-    # self-checks the toggle and is a no-op when off, so leaving it
-    # always-mounted is cheap.
-    demo_generator_fragment()
+    # First-cold-start auto-seed for the hosted demo. Idempotent and
+    # cached so this fires once per process at most. Runs AFTER sidebar
+    # so a slow seed cannot block the sidebar from rendering.
+    ensure_demo_data_seeded()
+
+    # Demo data generator: only mount the every-8s rerun fragment if the
+    # user has explicitly toggled it on in Settings. Auto-mounting it on
+    # the hosted demo previously caused continuous reruns during cold
+    # start that interacted badly with sidebar state in newer Streamlit
+    # versions. Auto-seed (above) still populates the dashboard for
+    # visitors; the live tail just stops growing on its own.
+    if st.session_state.get("demo_generator_on", False):
+        demo_generator_fragment()
 
     if view == "overview":
         view_overview()
