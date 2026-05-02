@@ -1539,6 +1539,116 @@ def demo_generator_active() -> bool:
     return bool(st.session_state.get(_DEMO_FLAG_KEY, False))
 
 
+def seed_historical_events(days: int = 30, count: int = 150) -> tuple[int, str | None]:
+    """Backfill `count` synthetic events spread across the last `days`.
+
+    Used to populate the Overview charts on a fresh install or after a
+    `Clear demo events` so the dashboard looks lived-in immediately. The
+    timestamps follow a slightly-skewed distribution (more recent days
+    get more events) and a business-hour bias so the daily bars vary
+    naturally.
+
+    Returns (rows_inserted, error_or_None). Each row is classified
+    through the real pipeline so MITRE mapping and severity tiers
+    populate correctly.
+    """
+    import random as _random
+
+    db = _db()
+    rng = _random.Random(time.time_ns())
+    examples = list(EXAMPLE_INCIDENTS.items())
+
+    suffix_pool = [
+        " Source IP: 10.{a}.{b}.{c}.",
+        " Asset: WS-{tag}-{n:02d}.",
+        " Sensor cluster {region}-{idx}.",
+        " EDR alert id: ED-{ts}.",
+        " Detected by sensor {region}-soc-{idx}.",
+    ]
+    regions = ["us-east", "eu-west", "ap-south", "us-west", "eu-north"]
+    tags = ["FIN", "HR", "EXEC", "IT", "OPS", "DEV"]
+
+    inserted = 0
+    now = datetime.now()
+    try:
+        for _ in range(count):
+            # Skewed distribution: bias toward recent days
+            day_offset = int(rng.triangular(0, days - 1, 0))
+            # Business-hour bias: 7am - 9pm
+            hour = rng.randint(7, 21) if rng.random() > 0.15 else rng.randint(0, 23)
+            minute = rng.randint(0, 59)
+            second = rng.randint(0, 59)
+            event_dt = now - timedelta(days=day_offset)
+            event_dt = event_dt.replace(
+                hour=hour, minute=minute, second=second, microsecond=0
+            )
+
+            label, body = rng.choice(examples)
+            suffix_template = rng.choice(suffix_pool)
+            suffix = suffix_template.format(
+                a=rng.randint(1, 250),
+                b=rng.randint(1, 250),
+                c=rng.randint(2, 254),
+                tag=rng.choice(tags),
+                n=rng.randint(10, 99),
+                region=rng.choice(regions),
+                idx=rng.randint(1, 4),
+                ts=rng.randint(10000, 99999),
+            )
+            text = f"[demo] {body}{suffix}"
+
+            try:
+                result = predict(
+                    text,
+                    threshold=float(st.session_state.get("threshold", 0.5)),
+                    max_classes=int(st.session_state.get("max_classes", 5)),
+                )
+            except Exception as exc:
+                return inserted, f"predict failed at row {inserted}: {exc}"
+
+            # Persist directly with a backdated timestamp so the chart
+            # spreads across the full window. We bypass _persist_analysis
+            # because that helper uses datetime.now() inside save_analysis.
+            try:
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO analysis_history
+                        (timestamp, incident_text, final_label, max_prob,
+                         uncertainty_level, analysis_mode, difficulty,
+                         threshold, use_llm, raw_result, batch_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_dt.isoformat(),
+                            text,
+                            result["final_label"],
+                            float(result.get("max_prob", 0)),
+                            result.get("uncertainty_level"),
+                            "demo",
+                            "default",
+                            float(st.session_state.get("threshold", 0.5)),
+                            0,
+                            None,
+                            "demo",
+                        ),
+                    )
+                    inserted += 1
+            except Exception as exc:
+                return inserted, f"persist failed at row {inserted}: {exc}"
+    finally:
+        # Bust the cached history snapshot so the Overview fragments
+        # repaint with the new rows on the next refresh.
+        try:
+            _overview_history_snapshot.clear()
+            _overview_meta_snapshot.clear()
+        except Exception:
+            pass
+
+    return inserted, None
+
+
 def _clear_demo_events() -> int:
     """Remove demo-generated rows (batch_id = 'demo') from history.
 
@@ -1910,38 +2020,47 @@ def render_sidebar() -> None:
 # OVERVIEW PAGE
 # =============================================================================
 
-def view_overview() -> None:
-    render_page_header(
-        title="Mission control",
-        subtitle="Triage volume, classification distribution, and recent activity across the AlertSage corpus.",
-        breadcrumb="Dashboards / Overview",
-    )
+# --- Cached snapshot helpers (shared across all live Overview fragments) ---
 
-    db = _db()
-    history = []
-    bookmarks = []
-    notes = []
+@st.cache_data(ttl=4, show_spinner=False)
+def _overview_history_snapshot(_cache_bust: float) -> list[dict]:
+    """Return the most recent triage history.
+
+    Cached for 4 seconds so the four data fragments on Overview share
+    one DB hit per refresh cycle. The argument is a cache buster the
+    fragments pass through so the cache invalidates when needed.
+    """
     try:
-        history = db.get_analysis_history(limit=10000) or []
-        bookmarks = db.get_bookmarks() or []
-        notes = db.get_all_notes() or []
-    except Exception as exc:
-        st.error(f"Could not load dashboard data: {exc}")
+        return _db().get_analysis_history(limit=10000) or []
+    except Exception:
+        return []
 
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _overview_meta_snapshot() -> dict[str, int]:
+    try:
+        return {
+            "bookmarks": len(_db().get_bookmarks() or []),
+            "notes":     len(_db().get_all_notes() or []),
+        }
+    except Exception:
+        return {"bookmarks": 0, "notes": 0}
+
+
+def _history_bucket_key() -> float:
+    """Bucket the cache key into 4 second windows so fragments collide."""
+    return float(int(time.time() // 4))
+
+
+def _compute_overview_stats(history: list[dict]) -> dict[str, Any]:
     now = datetime.now()
-    # Time windows
-    def _within(hours: int) -> list:
+    def _within(hours: int) -> int:
         cutoff = now - timedelta(hours=hours)
-        return [
-            h for h in history
+        return sum(
+            1 for h in history
             if "timestamp" in h
             and _safe_dt(h["timestamp"]) and _safe_dt(h["timestamp"]) > cutoff
-        ]
-    h_24 = _within(24)
-    h_7d = _within(24 * 7)
-    h_30d = _within(24 * 30)
-
-    total = len(history)
+        )
     sev_counts: Counter[str] = Counter()
     label_counts: Counter[str] = Counter()
     confidences: list[float] = []
@@ -1953,156 +2072,199 @@ def view_overview() -> None:
             confidences.append(float(h.get("max_prob") or 0))
         except Exception:
             pass
-    avg_conf = float(np.mean(confidences)) if confidences else 0.0
-    high_severity = sev_counts.get("critical", 0) + sev_counts.get("high", 0)
+    return {
+        "total": len(history),
+        "h_24": _within(24),
+        "h_7d": _within(24 * 7),
+        "h_30d": _within(24 * 30),
+        "sev_counts": sev_counts,
+        "label_counts": label_counts,
+        "high_severity": sev_counts.get("critical", 0) + sev_counts.get("high", 0),
+        "avg_conf": float(np.mean(confidences)) if confidences else 0.0,
+    }
 
-    # ---- KPI strip ----
-    cols = st.columns(6, gap="small")
-    cols[0].markdown(
-        render_kpi(
-            "Total analyzed", f"{total:,}",
-            sub=f"+{len(h_7d)} last 7d" if h_7d else "no recent activity",
-            tone="info",
-        ),
-        unsafe_allow_html=True,
-    )
-    cols[1].markdown(
-        render_kpi(
-            "Critical / high", f"{high_severity:,}",
-            sub=f"{(high_severity / total * 100):.0f}% of corpus" if total else "n/a",
-            tone="critical" if high_severity else "low",
-        ),
-        unsafe_allow_html=True,
-    )
-    cols[2].markdown(
-        render_kpi(
-            "Last 24h", f"{len(h_24):,}",
-            sub=f"vs {len(h_7d) - len(h_24):,} prior 6d" if h_7d else "no events",
-            tone="medium" if len(h_24) > 0 else "low",
-        ),
-        unsafe_allow_html=True,
-    )
+
+# --- Live Overview fragments ----------------------------------------------
+
+@st.fragment(run_every="6s")
+def _overview_kpi_fragment() -> None:
+    history = _overview_history_snapshot(_history_bucket_key())
+    meta = _overview_meta_snapshot()
+    stats = _compute_overview_stats(history)
+    total = stats["total"]
+    high_severity = stats["high_severity"]
+    h_24 = stats["h_24"]
+    h_7d = stats["h_7d"]
+    avg_conf = stats["avg_conf"]
     avg_tone = (
         "low" if avg_conf >= 0.8
         else "medium" if avg_conf >= 0.6
         else "high" if total else "info"
     )
-    cols[3].markdown(
-        render_kpi(
-            "Avg confidence",
-            f"{avg_conf:.0%}" if total else "n/a",
-            sub="classifier output", tone=avg_tone,
-        ),
-        unsafe_allow_html=True,
-    )
-    cols[4].markdown(
-        render_kpi(
-            "Bookmarks", f"{len(bookmarks):,}",
-            sub="saved investigations", tone="info",
-        ),
-        unsafe_allow_html=True,
-    )
-    cols[5].markdown(
-        render_kpi(
-            "Analyst notes", f"{len(notes):,}",
-            sub="across history", tone="info",
-        ),
-        unsafe_allow_html=True,
-    )
+    cols = st.columns(6, gap="small")
+    cols[0].markdown(render_kpi(
+        "Total analyzed", f"{total:,}",
+        sub=f"+{h_7d} last 7d" if h_7d else "no recent activity",
+        tone="info",
+    ), unsafe_allow_html=True)
+    cols[1].markdown(render_kpi(
+        "Critical / high", f"{high_severity:,}",
+        sub=f"{(high_severity / total * 100):.0f}% of corpus" if total else "n/a",
+        tone="critical" if high_severity else "low",
+    ), unsafe_allow_html=True)
+    cols[2].markdown(render_kpi(
+        "Last 24h", f"{h_24:,}",
+        sub=f"vs {h_7d - h_24:,} prior 6d" if h_7d else "no events",
+        tone="medium" if h_24 > 0 else "low",
+    ), unsafe_allow_html=True)
+    cols[3].markdown(render_kpi(
+        "Avg confidence",
+        f"{avg_conf:.0%}" if total else "n/a",
+        sub="classifier output", tone=avg_tone,
+    ), unsafe_allow_html=True)
+    cols[4].markdown(render_kpi(
+        "Bookmarks", f"{meta['bookmarks']:,}",
+        sub="saved investigations", tone="info",
+    ), unsafe_allow_html=True)
+    cols[5].markdown(render_kpi(
+        "Analyst notes", f"{meta['notes']:,}",
+        sub="across history", tone="info",
+    ), unsafe_allow_html=True)
 
-    # ---- Row 1: events-over-time (wide) + threat feed (rail) ----
-    left, right = st.columns([5, 3], gap="large")
 
-    with left:
-        render_section_head(
-            "Events over time",
-            "Last 30 days, brush the slider below to focus a window",
+@st.fragment(run_every="6s")
+def _overview_charts_fragment() -> None:
+    """Events-over-time + confidence histogram + severity donut."""
+    history = _overview_history_snapshot(_history_bucket_key())
+    stats = _compute_overview_stats(history)
+
+    render_section_head(
+        "Events over time",
+        f"Last 30 days, brush the slider to focus a window · "
+        f"updated {datetime.now().strftime('%H:%M:%S')}",
+    )
+    fig = _events_over_time_figure(history, days=30)
+    if fig is None:
+        render_empty(
+            "No events yet",
+            "Run an Investigate triage or enable the demo generator in "
+            "Settings to populate this view.",
         )
-        fig = _events_over_time_figure(history, days=30)
-        if fig is None:
-            render_empty(
-                "No events yet",
-                "Triage your first incident in the Investigate tab. It will "
-                "appear here once classified.",
-            )
+    else:
+        st.plotly_chart(fig, use_container_width=True, key="ovw_chart_main")
+
+    sub_left, sub_right = st.columns(2, gap="medium")
+    with sub_left:
+        render_section_head("Classifier confidence", "histogram")
+        chist = _confidence_histogram_figure(history)
+        if chist is None:
+            render_empty("No confidence data", "Triage events to populate.")
         else:
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Confidence histogram + severity donut side by side
-        sub_left, sub_right = st.columns(2, gap="medium")
-        with sub_left:
-            render_section_head("Classifier confidence", "histogram")
-            chist = _confidence_histogram_figure(history)
-            if chist is None:
-                render_empty("No confidence data", "Triage events to populate.")
-            else:
-                st.plotly_chart(chist, use_container_width=True)
-        with sub_right:
-            render_section_head("Severity distribution", "donut")
-            if total == 0:
-                render_empty("No data", "Severity tiers populate as you triage.")
-            else:
-                st.plotly_chart(_severity_donut(sev_counts), use_container_width=True)
-
-    with right:
-        st.markdown(render_threat_feed(), unsafe_allow_html=True)
-        # Live tail auto-refreshes every 5 seconds independent of the rest
-        # of the page (st.fragment).
-        render_live_tail_fragment(n=6)
-
-    # ---- Row 2: MITRE heatmap (wide) + top classifications ----
-    left2, right2 = st.columns([5, 3], gap="large")
-
-    with left2:
-        render_section_head("MITRE ATT&CK coverage", "tactic x technique density")
-        heatmap_fig = _mitre_heatmap_figure(history)
-        if heatmap_fig is None:
-            render_empty(
-                "No technique coverage",
-                "Techniques map automatically once incidents are classified.",
-            )
+            st.plotly_chart(chist, use_container_width=True, key="ovw_chart_hist")
+    with sub_right:
+        render_section_head("Severity distribution", "donut")
+        if stats["total"] == 0:
+            render_empty("No data", "Severity tiers populate as you triage.")
         else:
-            st.plotly_chart(heatmap_fig, use_container_width=True)
-
-    with right2:
-        render_section_head("Top classifications", "by count")
-        if not label_counts:
-            render_empty("No classifications", "Run a triage to track labels.")
-        else:
-            top = label_counts.most_common(8)
-            max_count = top[0][1] if top else 1
-            rows_html = "".join(
-                f'''<div class="soc-dist__row">
-                    <div class="soc-dist__name">
-                        {severity_pill(lbl, fallback_text=humanize(lbl))}
-                    </div>
-                    <div class="soc-dist__bar-wrap">
-                        <div class="soc-dist__bar-fill" style="width: {(c / max_count * 100):.1f}%; '''
-                f'''background: {SEVERITY_COLOR_HEX.get(severity_for(lbl), "#3b82f6")};"></div>
-                    </div>
-                    <div class="soc-dist__count">{c:,}</div>
-                </div>'''
-                for lbl, c in top
-            )
-            st.markdown(
-                f'<div class="soc-panel">'
-                f'<div class="soc-panel__title">Triage labels '
-                f'<span class="soc-meta">{len(label_counts)} unique</span></div>'
-                f'<div class="soc-dist">{rows_html}</div>'
-                '</div>',
-                unsafe_allow_html=True,
+            st.plotly_chart(
+                _severity_donut(stats["sev_counts"]),
+                use_container_width=True,
+                key="ovw_chart_donut",
             )
 
-    # ---- Recent events table ----
+
+@st.fragment(run_every="8s")
+def _overview_mitre_fragment() -> None:
+    history = _overview_history_snapshot(_history_bucket_key())
+    render_section_head("MITRE ATT&CK coverage", "tactic x technique density")
+    heatmap_fig = _mitre_heatmap_figure(history)
+    if heatmap_fig is None:
+        render_empty(
+            "No technique coverage",
+            "Techniques map automatically once incidents are classified.",
+        )
+    else:
+        st.plotly_chart(heatmap_fig, use_container_width=True, key="ovw_chart_mitre")
+
+
+@st.fragment(run_every="8s")
+def _overview_top_labels_fragment() -> None:
+    history = _overview_history_snapshot(_history_bucket_key())
+    stats = _compute_overview_stats(history)
+    label_counts: Counter[str] = stats["label_counts"]
+    render_section_head("Top classifications", "by count")
+    if not label_counts:
+        render_empty("No classifications", "Run a triage to track labels.")
+        return
+    top = label_counts.most_common(8)
+    max_count = top[0][1] if top else 1
+    rows_html = "".join(
+        f'''<div class="soc-dist__row">
+            <div class="soc-dist__name">
+                {severity_pill(lbl, fallback_text=humanize(lbl))}
+            </div>
+            <div class="soc-dist__bar-wrap">
+                <div class="soc-dist__bar-fill" style="width: {(c / max_count * 100):.1f}%; '''
+        f'''background: {SEVERITY_COLOR_HEX.get(severity_for(lbl), "#3b82f6")};"></div>
+            </div>
+            <div class="soc-dist__count">{c:,}</div>
+        </div>'''
+        for lbl, c in top
+    )
+    st.markdown(
+        f'<div class="soc-panel">'
+        f'<div class="soc-panel__title">Triage labels '
+        f'<span class="soc-meta">{len(label_counts)} unique</span></div>'
+        f'<div class="soc-dist">{rows_html}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment(run_every="6s")
+def _overview_recent_table_fragment() -> None:
+    history = _overview_history_snapshot(_history_bucket_key())
     render_section_head("Recent events", action="latest 10")
     recent = sorted(history, key=lambda x: x.get("timestamp", ""), reverse=True)[:10]
     if not recent:
         render_empty(
             "Quiet on the wire",
-            "No triage runs yet. Click <strong>Investigate</strong> in the sidebar to analyze your first incident.",
+            "No triage runs yet. Click <strong>Investigate</strong> in the sidebar to analyze your first incident, "
+            "or enable the demo generator in Settings to backfill synthetic events.",
         )
     else:
         st.markdown(_recent_events_table(recent), unsafe_allow_html=True)
+
+
+def view_overview() -> None:
+    render_page_header(
+        title="Mission control",
+        subtitle="Triage volume, classification distribution, and recent activity across the AlertSage corpus. All data panels auto-refresh.",
+        breadcrumb="Dashboards / Overview",
+    )
+
+    # KPI strip (auto-refresh)
+    _overview_kpi_fragment()
+
+    # Row 1: charts on the left, threat feed + live tail on the right.
+    # The left column is one big fragment so the chart, histogram, and
+    # donut all repaint on the same cadence.
+    left, right = st.columns([5, 3], gap="large")
+    with left:
+        _overview_charts_fragment()
+    with right:
+        st.markdown(render_threat_feed(), unsafe_allow_html=True)
+        render_live_tail_fragment(n=6)
+
+    # Row 2: MITRE heatmap + top classifications, each in its own fragment.
+    left2, right2 = st.columns([5, 3], gap="large")
+    with left2:
+        _overview_mitre_fragment()
+    with right2:
+        _overview_top_labels_fragment()
+
+    # Recent events table (auto-refresh)
+    _overview_recent_table_fragment()
 
 
 def _safe_dt(ts: str | None) -> datetime | None:
@@ -2160,11 +2322,16 @@ def _events_over_time_figure(history: list[dict], days: int = 30):
         ))
 
     layout = {**PLOT_LAYOUT}
-    # Replace the default xaxis with a brushable one
+    # Replace the default xaxis with a brushable one. The visible range
+    # extends one day past "now" so today's events (which sit at midnight
+    # on the bucket date) are not clipped by the right edge of the
+    # plotting area.
     visible_start = (
         datetime.now() - timedelta(days=14)
     ).date().isoformat()
-    visible_end = datetime.now().date().isoformat()
+    visible_end = (
+        datetime.now() + timedelta(days=1)
+    ).date().isoformat()
     layout["xaxis"] = dict(
         showgrid=False,
         color="#94a3b8",
@@ -3306,6 +3473,52 @@ def view_settings() -> None:
             ):
                 n = _clear_demo_events()
                 st.toast(f"Removed {n} demo events.", icon=None)
+
+        # Backfill row: seed 30 days of synthetic events so charts look
+        # populated immediately. This is the demo-appearance lever.
+        backfill_cols = st.columns([2, 1, 1], gap="small")
+        with backfill_cols[0]:
+            backfill_count = st.slider(
+                "Backfill volume",
+                min_value=30, max_value=400, value=150, step=10,
+                key="settings_backfill_count",
+                help="Number of synthetic events to spread across the last 30 days.",
+            )
+        with backfill_cols[1]:
+            backfill_days = st.selectbox(
+                "Window",
+                options=[7, 14, 30, 60],
+                index=2,
+                key="settings_backfill_days",
+                format_func=lambda d: f"{d} days",
+            )
+        with backfill_cols[2]:
+            st.markdown('<div style="height: 1.7rem;"></div>', unsafe_allow_html=True)
+            if st.button(
+                "Backfill history",
+                use_container_width=True,
+                key="settings_demo_seed",
+                type="primary",
+            ):
+                with st.spinner(
+                    f"Seeding {backfill_count} events across {backfill_days} days..."
+                ):
+                    n, err = seed_historical_events(
+                        days=int(backfill_days),
+                        count=int(backfill_count),
+                    )
+                if err:
+                    st.error(f"Seeded {n} rows then failed: {err}")
+                else:
+                    st.session_state[_DEMO_COUNT_KEY] = (
+                        int(st.session_state.get(_DEMO_COUNT_KEY, 0)) + n
+                    )
+                    st.toast(
+                        f"Seeded {n} synthetic events across the last "
+                        f"{backfill_days} days.",
+                        icon=None,
+                    )
+                    st.rerun()
 
     # Status row: count + last emit + last error
     count = int(st.session_state.get(_DEMO_COUNT_KEY, 0))

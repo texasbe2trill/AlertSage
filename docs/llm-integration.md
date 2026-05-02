@@ -1,215 +1,218 @@
-# LLM Integration
+# LLM integration
 
-## Overview
+AlertSage routes the LLM second opinion through whichever provider you select. Four providers are supported out of the box:
 
-The project uses **llama.cpp** for privacy-first local LLM inference in two key areas:
+| Provider | Default model | When to use |
+|---|---|---|
+| **Hugging Face Inference** | `meta-llama/Llama-3.1-8B-Instruct:cerebras` | Quick demo, free-tier or paid HF account, hosted demo on Streamlit Cloud. |
+| **OpenAI** | `gpt-4o-mini` | Best rationale quality on commodity hardware, low cost. |
+| **Anthropic** | `claude-haiku-4-5` | Best rationale quality with longer context. |
+| **Local llama.cpp** | local `.gguf` file | Air-gapped deployments, no network egress. |
 
-1. **Dataset Generation** - Enhancing synthetic narratives
-2. **Second-Opinion Triage** - Assisting with uncertain classifications
+All providers implement the same `generate_json(prompt) -> dict` interface so the dispatcher in `llm_helpers.llm_second_opinion()` is provider-agnostic. Adding a fifth provider is a small, isolated patch in `src/triage/llm_client.py`.
 
-## Setup
+## Bring Your Own Key
+
+!!! info "Keys never touch disk"
+    API keys live in `st.session_state` only. They are never written to `data/triage.db` and never persisted to any other file. Closing the browser tab clears them.
+
+The console exposes a Bring Your Own Key panel for each remote provider in **Settings**. Paste a key once, it stays for the rest of the session. The same provider also accepts the key from `~/.streamlit/secrets.toml` or environment variables; precedence is sidebar/Settings > secrets.toml > env vars.
+
+### Where keys are read
+
+| Provider | Sidebar/Settings | Secrets file key | Env var |
+|---|---|---|---|
+| Hugging Face | yes (token) | `HF_TOKEN`, `HF_MODEL` | `TRIAGE_HF_TOKEN`, `HF_TOKEN`, `TRIAGE_HF_MODEL`, `HF_MODEL` |
+| OpenAI | yes (key) | not read | session-only |
+| Anthropic | yes (key) | not read | session-only |
+| Local | n/a | n/a | `TRIAGE_LLM_MODEL` (path to .gguf) |
+| VirusTotal | yes (key) | `VIRUSTOTAL_API_KEY`, `VT_API_KEY` | `VIRUSTOTAL_API_KEY`, `VT_API_KEY` |
+
+OpenAI and Anthropic keys are **session only by design**. If you want to persist them for a deployment, export them in your shell or pass via your hosting platform's secrets mechanism.
+
+## Fallback chain
+
+The dispatcher (`_build_llm_kwargs` in `app.py`) routes intelligently when keys are missing or providers are unavailable:
+
+```text
+Pick OpenAI:
+  has key?      -> OpenAI
+  no key, hf    -> Hugging Face Router (if HF_TOKEN)
+  no key, local -> local llama.cpp (if GGUF available)
+
+Pick Anthropic:
+  has key?      -> Anthropic
+  no key, hf    -> Hugging Face Router (if HF_TOKEN)
+  no key, local -> local llama.cpp (if GGUF available)
+
+Pick Local:
+  GGUF + llama_cpp present? -> local llama.cpp
+  otherwise                  -> Hugging Face Router
+```
+
+The sidebar caption shows the actually-active backend after fallbacks resolve.
+
+## Per-provider rate limits
+
+Each provider has its own sliding-window limiter, default 5 requests per 60 seconds. Burning OpenAI quota does not lock out Anthropic or Hugging Face. The window and request count come from `RATE_LIMIT_REQS` and `RATE_LIMIT_WINDOW_S` in `app.py`.
+
+When the limit is hit, the UI surfaces a friendly "wait Ns" message instead of a stack trace.
+
+## Hugging Face Inference
+
+Default provider for the hosted demo. Uses the HF Router REST endpoint (`https://router.huggingface.co/v1/chat/completions`), so you can target any model the router supports including provider-suffixed variants like `meta-llama/Llama-3.1-8B-Instruct:cerebras`.
+
+```bash
+# Read once and cache
+export HF_TOKEN="hf_..."
+
+# Or via secrets.toml
+cat > .streamlit/secrets.toml <<EOF
+HF_TOKEN = "hf_..."
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct:cerebras"
+EOF
+```
+
+Token has Inference scope (free-tier works for low-volume demos).
+
+## OpenAI
+
+Uses the official `openai` Python SDK with the Chat Completions endpoint and `response_format={"type": "json_object"}` to enforce JSON output.
+
+```python
+# What the dispatcher calls under the hood
+client = OpenAIClient(
+    api_key="sk-...",
+    model="gpt-4o-mini",
+    max_new_tokens=512,
+    rate_limiter=...,
+)
+response = client.generate_json(prompt)  # returns dict
+```
+
+Recommended models:
+
+- `gpt-4o-mini` (default): cheap, fast, good enough for SOC rationale
+- `gpt-4o`: better quality, more expensive
+- `gpt-4.1-mini`: middle ground
+
+The system prompt (`SOC_SYSTEM_PROMPT` in `llm_client.py`) instructs the model to return strict JSON with `label`, `mitre_ids`, and `rationale`.
+
+## Anthropic
+
+Uses the official `anthropic` Python SDK with the Messages API. The system prompt is set via `system=`, the user prompt via `messages=[{"role": "user", "content": ...}]`.
+
+Recommended models:
+
+- `claude-haiku-4-5` (default): cheap, fast, longer context than gpt-4o-mini
+- `claude-sonnet-4-6`: higher quality
+- `claude-opus-4-7`: highest quality, most expensive
+
+Anthropic responses come back as a list of content blocks; the client extracts `block.text` for `block.type == "text"` and concatenates.
+
+## Local llama.cpp
+
+For air-gapped or zero-egress deployments. The Local (GGUF) provider option in the sidebar is **automatically hidden** when its prerequisites are missing:
+
+1. The `llama_cpp` Python package must be importable.
+2. A `.gguf` file must be present in `models/`.
+
+When either check fails, the option does not appear and the dispatcher's fallback routes to Hugging Face instead.
 
 ### Install llama-cpp-python
 
 ```bash
-# For Apple Silicon (Metal acceleration)
+# Apple Silicon (Metal acceleration)
 CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python
 
-# For CUDA GPUs
+# CUDA
 CMAKE_ARGS="-DLLAMA_CUDA=on" pip install llama-cpp-python
 
 # CPU only
 pip install llama-cpp-python
 ```
 
-### Download Model
+Or use the dev extras: `pip install -e ".[dev]"` includes a pinned `llama-cpp-python==0.3.16`.
 
-Choose a GGUF model and download via Hugging Face CLI (authenticate if required):
+### Download a GGUF model
 
 ```bash
-# Create models directory
 mkdir -p models
 
-# Option A: Llama 3.1 8B Instruct (higher quality)
+# Llama 3.1 8B Instruct, Q6_K (about 6 GB, recommended)
 huggingface-cli download TheBloke/Llama-3.1-8B-Instruct-GGUF \
   Llama-3.1-8B-Instruct-Q6_K.gguf --local-dir models
 
-# Option B: Mistral 7B Instruct v0.2 (mid-size)
+# Mistral 7B Instruct v0.2, Q6_K (about 5.5 GB)
 huggingface-cli download TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
   mistral-7b-instruct-v0.2.Q6_K.gguf --local-dir models
 
-# Option C: TinyLlama 1.1B Chat (small, CPU-friendly)
-huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0-GGUF \
-  TinyLlama-1.1B-Chat-v1.0.Q6_K.gguf --local-dir models
+# TinyLlama 1.1B, Q4_K_M (about 700 MB, CPU-friendly)
+huggingface-cli download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \
+  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --local-dir models
 ```
 
-### Configure Environment
+### Configure the path
+
+Default path: `models/Meta-Llama-3.1-8B-Instruct-Q6_K.gguf`. Override with `TRIAGE_LLM_MODEL`:
 
 ```bash
-# Preferred (CLI):
-export TRIAGE_LLM_MODEL="$(pwd)/models/Llama-3.1-8B-Instruct-Q6_K.gguf"
-export TRIAGE_LLM_DEBUG=1
-
-# Alternative (library client compatibility):
-export NLP_TRIAGE_LLM_BACKEND="$TRIAGE_LLM_MODEL"
+export TRIAGE_LLM_MODEL="/absolute/path/to/your-model.gguf"
 ```
 
-## Dataset Generation
+GPU acceleration is auto-enabled at first call:
 
-### Enable LLM Rewriting
+- `LLAMA_N_GPU_LAYERS=999` (offload all layers)
+- `LLAMA_METAL=1` on macOS
+- `LLAMA_CUDA=1` on NVIDIA
+
+To force CPU-only, set these to `0` in your environment before launching.
+
+## VirusTotal IOC enrichment
+
+The IOC panel on **Investigate** auto-extracts indicators from the narrative (IPv4, IPv6, MD5, SHA1, SHA256, URL, email, domain, CVE, hostnames). Without a VirusTotal key it shows a **deterministic mock**: the same indicator always returns the same verdict, score, and source list, so the demo is reproducible.
+
+Paste a VirusTotal API key in **Settings -> Threat intel enrichment** and the panel switches to **live VT lookups**. Free-tier keys work; results are cached for 15 minutes per indicator to stay under the 4 req/min free-tier limit.
+
+The enrichment shape is provider-agnostic so swapping in AbuseIPDB, OTX, GreyNoise, or an aggregator is a one-function change. See `_vt_lookup` and `_enrich_ioc_real_or_mock` in `app.py`.
+
+### External pivot links
+
+Each IOC row also exposes click-through pivot links to:
+
+| IOC type | Pivots |
+|---|---|
+| ipv4 / ipv6 | VirusTotal, AbuseIPDB, Shodan, GreyNoise |
+| domain | VirusTotal, URLhaus, Censys |
+| md5 / sha1 / sha256 | VirusTotal, MalwareBazaar |
+| url | URLhaus, VirusTotal |
+| cve | NVD, MITRE CVE |
+
+These open in a new tab and require no API keys.
+
+## Prompt engineering
+
+The triage prompt is a single function (`llm_second_opinion` in `src/triage/llm_helpers.py`). Two key elements:
+
+1. **Strict JSON output** with three keys: `label`, `mitre_ids`, `rationale`. The system prompt explicitly tells the model to refuse free-form prose and only emit the JSON object.
+2. **Hallucination guardrails**: extracted IOCs from the narrative are compared against the model's rationale. If the model invents an IOC that wasn't in the source narrative, the label is downgraded to `uncertain` and the rationale is replaced with a deterministic fallback. See `_extract_indicators` in `llm_helpers.py`.
+
+A second pass applies **keyword validation per label**. If the model returns `data_exfiltration` but the narrative contains no exfil-style keywords, the label downgrades to `uncertain`. This is a deliberate conservatism trade-off: better to mark uncertain than to confidently misclassify.
+
+## Debugging
+
+Enable verbose LLM logs by setting `TRIAGE_LLM_DEBUG=1` before launching:
 
 ```bash
-python generator/generate_cyber_incidents.py \
-  --n-events 5000 \
-  --use-llm \
-  --rewrite-report audit.json
+TRIAGE_LLM_DEBUG=1 streamlit run app.py
 ```
 
-### Rewrite Parameters
+Debug output goes to stderr (so JSON output on stdout from the CLI stays clean).
 
-```bash
-export NLP_TRIAGE_LLM_REWRITE_PROB=0.30  # 30% of incidents rewritten
-export NLP_TRIAGE_LLM_TEMPERATURE=0.2     # Focused generation
-export NLP_TRIAGE_LLM_MAX_RETRIES=3       # Error recovery
-```
+The Settings -> Demo data generator panel also surfaces the **last LLM error** if the demo fragment hits one. Use this to diagnose key issues, model mismatches, or rate-limit blowback without digging through logs.
 
-### How It Works
+## Cost notes
 
-1. Generator creates baseline narrative
-2. LLM probabilistically rewrites (30% by default)
-3. Sanitization removes artifacts
-4. Validation ensures quality
-5. Audit log tracks statistics
+The LLM second opinion runs once per triage. With a 200-row Batch and OpenAI gpt-4o-mini at typical pricing, a full run is fractions of a cent. Anthropic Haiku is similar. Hugging Face free-tier covers small demos; paid is per-token.
 
-## Second-Opinion Triage
-
-### CLI Usage
-
-```bash
-# Single incident
-nlp-triage --llm-second-opinion "Suspicious activity detected"
-
-# Bulk processing
-nlp-triage --llm-second-opinion \
-  --input-file incidents.txt \
-  --output-file results.jsonl
-```
-
-### Streamlit UI
-
-Enable "LLM Second Opinion" toggle in the sidebar.
-
-### Guardrails
-
-The second-opinion engine includes multiple safety layers:
-
-1. **JSON Parsing** - Structured output validation
-2. **SOC Keyword Intelligence** - Domain-specific validation
-3. **Label Normalization** - Maps variations to canonical labels
-4. **Confidence Filtering** - Only engages on uncertain cases
-5. **Timeout Protection** - Prevents hanging on bad inputs
-
-## Advanced Configuration
-
-### Model Parameters
-
-```bash
-# Context window (tokens)
-export TRIAGE_LLM_CTX=4096
-
-# Max generation tokens
-export TRIAGE_LLM_MAX_TOKENS=512
-
-# Temperature (creativity)
-export TRIAGE_LLM_TEMP=0.2
-
-# Top-p sampling
-export TRIAGE_LLM_TOP_P=0.9
-```
-
-### Backend Selection
-
-```bash
-# Absolute path to model
-export NLP_TRIAGE_LLM_BACKEND=/full/path/to/model.gguf
-```
-
-## Performance Tuning
-
-### CPU Optimization
-
-```bash
-# Increase thread count
-export OMP_NUM_THREADS=8
-
-# Use BLAS
-CMAKE_ARGS="-DLLAMA_BLAS=ON" pip install llama-cpp-python
-```
-
-### GPU Acceleration
-
-```bash
-# CUDA
-CMAKE_ARGS="-DLLAMA_CUDA=on" pip install llama-cpp-python
-
-# Metal (Apple Silicon)
-CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python
-```
-
-### Memory Management
-
-```bash
-# Reduce context for lower memory
-export TRIAGE_LLM_CTX=2048
-
-# Use quantized models (Q4, Q5)
-# Smaller = less accurate but faster
-```
-
-## Troubleshooting
-
-### Import Errors
-
-```bash
-# Reinstall with correct flags
-pip uninstall llama-cpp-python
-CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python
-```
-
-### Slow Inference
-
-- Use quantized models (Q5_K_S recommended)
-- Enable GPU acceleration
-- Reduce context window
-- Lower max tokens
-
-### Out of Memory
-
-- Use smaller model (7B instead of 13B)
-- Reduce context window
-- Close other applications
-
-### Debug Mode
-
-```bash
-export TRIAGE_LLM_DEBUG=1
-nlp-triage --llm-second-opinion "test incident"
-```
-
-## Best Practices
-
-✅ Use quantized models (Q5_K_S or Q4_K_M)  
-✅ Enable GPU acceleration when available  
-✅ Set appropriate context window for your RAM  
-✅ Monitor resource usage during generation  
-✅ Use lower temperature for focused outputs  
-✅ Enable debug mode for troubleshooting
-
-❌ Don't use unquantized models (too large)  
-❌ Don't set context > 8192 without sufficient RAM  
-❌ Don't ignore timeout warnings  
-❌ Don't disable guardrails in production
-
----
-
-See [Production Generation](production-generation.md) for monitoring LLM-enhanced dataset creation.
+For larger deployments, set the per-provider rate limit and watch the sidebar's rate-limit caption. Or skip the LLM entirely by leaving the **LLM second opinion** checkbox off in the sidebar; the classifier alone still produces a label, MITRE mapping, and a deterministic rule-based rationale.

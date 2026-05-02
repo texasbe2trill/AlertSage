@@ -1,329 +1,243 @@
-# NLP-Driven Incident Triage
+# AlertSage
 
-**Educational cybersecurity incident triage platform** demonstrating intelligent classification through Natural Language Processing, LLM enhancement, and uncertainty-aware predictions.
+A SOC-style incident triage console that classifies free-text security alerts, maps them to MITRE ATT&CK, and routes them through your LLM of choice. Open-source, dark-mode-first, modeled on production SIEM consoles.
 
 <div class="grid cards" markdown>
 
-- :material-lightning-bolt:{ .lg .middle } **Quick Start**
+- :material-view-dashboard:{ .lg .middle } **SOC console**
 
-  ***
+    ---
 
-  Get up and running in minutes with our streamlined setup guide
+    Six-page Streamlit application: Overview, Investigate, Hunt, Batch, Bookmarks, Settings.
 
-  [:octicons-arrow-right-24: Getting Started](getting-started.md)
+    [:octicons-arrow-right-24: UI guide](ui-guide.md)
 
-- :material-console:{ .lg .middle } **CLI Tool**
+- :material-console:{ .lg .middle } **CLI**
 
-  ***
+    ---
 
-  Powerful command-line interface for incident classification
+    `nlp-triage` for headless and scripted classification.
 
-  [:octicons-arrow-right-24: CLI Usage](cli.md)
+    [:octicons-arrow-right-24: CLI reference](cli.md)
 
-- :material-view-dashboard:{ .lg .middle } **Web Interface**
+- :material-rocket-launch:{ .lg .middle } **Quick start**
 
-  ***
+    ---
 
-  Interactive Streamlit UI with visual analytics and bulk processing
+    Install, launch the console, run your first triage.
 
-  [:octicons-arrow-right-24: UI Guide](ui-guide.md)
+    [:octicons-arrow-right-24: Getting started](getting-started.md)
 
-- :material-database:{ .lg .middle } **Dataset Generation**
+- :material-cog:{ .lg .middle } **LLM providers**
 
-  ***
+    ---
 
-  Create synthetic SOC datasets with LLM enhancement
+    Bring Your Own Key for OpenAI, Anthropic, Hugging Face, or run locally.
 
-  [:octicons-arrow-right-24: Data & Generator](data-and-generator.md)
+    [:octicons-arrow-right-24: LLM integration](llm-integration.md)
 
 </div>
 
 ---
 
-## Overview
+## What's new in v3.1.0
 
-An **educational/research platform** demonstrating intelligent cybersecurity incident triage through Natural Language Processing. This project showcases how analyst-style narratives can be converted into structured incident categories using a transparent, reproducible ML workflow.
+A complete rewrite of the Streamlit UI, modeled on Splunk Enterprise Security and Elastic Security. Dark theme, severity as the primary color signal, JetBrains Mono for IDs and timestamps, all styling consolidated into one external stylesheet.
 
-!!! warning "Educational Project - Not Production IR Tooling"
-This project is designed for **education, research, and portfolio demonstration**.  
- It is **not** a drop-in replacement for enterprise incident response systems and should not be deployed unsupervised in a live SOC environment.
+| Capability | Status |
+|---|---|
+| SOC-style six-page console | New |
+| MITRE ATT&CK kill chain visualization on Investigate | New |
+| Auto-extracting IOC panel with VirusTotal enrichment + external pivots | New |
+| Case status workflow (New / Triaging / Contained / Closed) | New |
+| Case timeline that stitches creation, status changes, notes, bookmarks | New |
+| MITRE ATT&CK heatmap on Overview | New |
+| Brushable Splunk-style timechart with range selectors | New |
+| Auto-refreshing live data panels | New |
+| Saved searches pinned to the sidebar | New |
+| MITRE coverage report + three CSV exports from Batch | New |
+| Anomaly score column on Hunt and Overview | New |
+| Demo data generator (synthetic events on a 6 second timer) | New |
+| BYOK panels for OpenAI, Anthropic, Hugging Face, VirusTotal | New |
+| Local (GGUF) provider hidden when prerequisites are missing | New |
+| Per-provider sliding-window rate limiter | New |
 
----
+The classifier, MITRE mapping, and database stack are unchanged. The CLI (`nlp-triage`) is unchanged.
 
-## ✨ Key Features
-
-<div class="grid cards" markdown>
-
-- :material-robot:{ .lg .middle } **LLM-Enhanced Generation**
-
-  ***
-
-  Local llama.cpp models for privacy-first intelligent dataset creation with sanitization and caching
-
-- :material-chart-line:{ .lg .middle } **Uncertainty-Aware Classification**
-
-  ***
-
-  TF-IDF + Logistic Regression with configurable thresholds and intelligent fallback handling
-
-- :material-brain:{ .lg .middle } **Second-Opinion Engine**
-
-  ***
-
-  LLM assistance for uncertain cases with JSON guardrails and hallucination prevention
-
-- :material-chart-box-outline:{ .lg .middle } **Interactive Analytics**
-
-  ***
-
-  Streamlit UI with real-time classification, bulk analysis, and visual threat intelligence
-
-- :material-monitor-dashboard:{ .lg .middle } **Production Monitoring**
-
-  ***
-
-  Real-time progress tracking, ETA calculation, and resource efficiency metrics
-
-- :material-test-tube:{ .lg .middle } **Research-Grade Dataset**
-
-  ***
-
-  100k synthetic incidents with MITRE ATT&CK enrichment and realistic noise
-
-</div>
+Full notes: [release notes](release-notes.md).
 
 ---
 
-## 🏗️ Architecture Overview
+## At a glance
+
+!!! info "Educational and research software"
+    AlertSage is built on a **synthetic** incident corpus and is intended for education, research, demos, and portfolio work. It is not a substitute for production security tooling, real threat intel feeds, or analyst judgment. Treat its output the way you would treat a junior analyst's first pass: a useful starting point that needs human review.
+
+The console takes a security analyst's most boring fifteen minutes (read the alert, decide a label, map to ATT&CK, write the rationale, paste actions into the ticket) and turns it into thirty seconds. It ships as a Streamlit-based SOC console plus a CLI; both run on the same TF-IDF + sentence-transformer + Logistic Regression pipeline, with an optional LLM second opinion routed through the provider you configure.
+
+---
+
+## SOC console pages
+
+| Page | Purpose |
+|---|---|
+| **Overview** | Mission control dashboard. Auto-refreshing KPIs, charts, MITRE heatmap, live tail, threat feed, recent events table. |
+| **Investigate** | Triage one incident end-to-end with kill chain, IOC enrichment, case timeline, classification probabilities, LLM rationale, playbook hint. |
+| **Hunt** | Search past triage results with full filter set + saved searches pinned to the sidebar. |
+| **Batch** | CSV ingest with MITRE coverage report and three CSV exports. |
+| **Bookmarks** | Saved investigations with case status workflow and timeline. |
+| **Settings** | Provider configuration, BYOK, demo generator, triage defaults. |
+
+Detailed walkthrough: [SOC console guide](ui-guide.md).
+
+---
+
+## Architecture
 
 ```mermaid
 graph TB
-    A[Data Generation] -->|LLM Rewriter| B[Synthetic Dataset]
-    B --> C[Preprocessing Pipeline]
-    C --> D[TF-IDF Vectorization]
-    D --> E{Baseline Classifier}
-    E -->|High Confidence| F[Direct Classification]
-    E -->|Low Confidence| G[LLM Second Opinion]
-    G --> H[Final Decision]
-    F --> H
-    H --> I[CLI Output]
-    H --> J[Streamlit UI]
-    H --> K[JSON Export]
+    A[app.py: Streamlit router + 6 pages] --> B[src/triage/]
+    A --> C[(data/triage.db)]
+    A --> D[assets/styles.css]
+    B --> E[classifier: TF-IDF 5000 dims + embeddings 384 dims]
+    B --> F[llm_client: HF / OpenAI / Anthropic / Local]
+    B --> G[database: SQLite ORM]
+    B --> H[llm_helpers: MITRE map, playbook hints, dispatcher]
+    F --> I{LLM provider router}
+    I -->|key configured| J[selected provider]
+    I -->|fallback| K[Hugging Face Inference]
+    I -->|air-gapped| L[Local llama.cpp]
 
-    style E fill:#9c27b0,stroke:#7b1fa2,color:#fff
-    style G fill:#ff9800,stroke:#f57c00,color:#fff
-    style H fill:#4caf50,stroke:#388e3c,color:#fff
+    style A fill:#3b82f6,stroke:#2563eb,color:#fff
+    style E fill:#8b5cf6,stroke:#7c3aed,color:#fff
+    style I fill:#f59e0b,stroke:#d97706,color:#0f172a
+    style J fill:#10b981,stroke:#059669,color:#fff
 ```
+
+More: [architecture](architecture.md).
 
 ---
 
-## 🎯 Use Cases
+## Use cases
 
-=== "Education"
+=== "SOC analysts"
 
-    - Learn NLP techniques for cybersecurity
-    - Understand uncertainty-aware classification
-    - Explore MITRE ATT&CK framework integration
-    - Study SOC automation concepts
+    - Triage one alert quickly with classification, MITRE mapping, and a SOC-style playbook.
+    - Bulk-process a CSV export from your SIEM and get a MITRE coverage report.
+    - Hunt across triage history with anomaly scoring and confidence filters.
+    - Save frequently-used filter sets and pin them to the sidebar.
 
-=== "Research"
+=== "Security engineers"
 
-    - Prototype triage automation ideas
-    - Experiment with LLM-enhanced generation
-    - Test classification algorithms
-    - Develop synthetic security datasets
+    - Demo automation patterns to leadership: kill chain visualization, case workflow, live tail.
+    - Compare LLM providers (OpenAI, Anthropic, Hugging Face, local) on the same incident.
+    - Build datasets and pipelines on top of the synthetic generator.
 
-=== "Portfolio"
+=== "Researchers and educators"
 
-    - Demonstrate ML engineering skills
-    - Showcase end-to-end project development
-    - Highlight production-grade tooling
-    - Present interactive visualizations
+    - Study uncertainty-aware classification with configurable thresholds.
+    - Explore TF-IDF + embedding hybrids end-to-end via 12 Jupyter notebooks.
+    - Use the synthetic dataset for SOC automation experiments.
 
 ---
 
-## 🚀 Quick Examples
+## Quick examples
 
-### CLI Classification
-
-```bash
-# Basic incident analysis
-nlp-triage "User reported suspicious email with attachment"
-
-# JSON output for scripting
-nlp-triage --json "Multiple failed login attempts detected"
-
-# LLM-assisted bulk processing
-nlp-triage --llm-second-opinion \
-  --input-file incidents.txt \
-  --output-file results.jsonl
-```
-
-### Dataset Generation
+### Launch the SOC console
 
 ```bash
-# Quick generation (1000 incidents)
-python generator/generate_cyber_incidents.py --n-events 1000
-
-# Production with monitoring
-./generator/launch_generator.sh 50000 my_dataset
-./generator/monitor_generation.sh my_dataset --watch
-```
-
-### Streamlit UI
-
-```bash
-# Launch interactive interface
 streamlit run app.py
 ```
 
----
+### CLI
 
-## 📊 What's Inside
+```bash
+# Single classification
+nlp-triage --text "User clicked a phishing link in their inbox"
 
-| Component     | Description                                                    |
-| ------------- | -------------------------------------------------------------- |
-| **Dataset**   | 100k synthetic SOC incidents with multi-perspective narratives |
-| **Models**    | TF-IDF vectorizer + Logistic Regression baseline               |
-| **CLI**       | Rich-formatted command-line interface with uncertainty logic   |
-| **UI**        | Streamlit web application with visual analytics                |
-| **Notebooks** | 9 Jupyter notebooks covering full ML pipeline                  |
-| **Generator** | LLM-enhanced synthetic data creation with monitoring           |
-| **Tests**     | Comprehensive pytest suite with CI/CD                          |
-| **Docs**      | MkDocs Material documentation site                             |
+# JSON output for scripting
+nlp-triage --text "..." --json
 
----
+# Bulk with LLM second opinion
+nlp-triage --bulk incidents.csv --use-llm --difficulty soc-medium
+```
 
-## 🎓 Learning Path
+### Synthetic data
 
-New to the project? Follow this recommended learning path:
-
-1. **:material-book-open-variant: [Getting Started](getting-started.md)** - Set up environment and run first predictions
-2. **:material-console: [CLI Usage](cli.md)** - Master the command-line interface
-3. **:material-database: [Dataset Generation](data-and-generator.md)** - Understand the synthetic data
-4. **:material-chart-line: [Modeling & Evaluation](modeling-and-eval.md)** - Deep dive into the ML pipeline
-5. **:material-notebook: [Notebooks Overview](notebooks.md)** - Explore interactive analysis
-6. **:material-code-braces: [Development Guide](development.md)** - Contribute to the project
+```bash
+python generator/generate_cyber_incidents.py --n-events 1000
+```
 
 ---
 
-## 🔬 Technical Highlights
+## What's inside
 
-### Shared Preprocessing Pipeline
-
-- Consistent text cleaning across training and inference
-- Unicode normalization and punctuation cleanup
-- TF-IDF feature extraction with 5k feature limit
-
-### Uncertainty-Aware Predictions
-
-- Configurable confidence thresholds
-- Intelligent `uncertain` fallback for ambiguous cases
-- Scenario-driven behavior matching SOC reality
-
-### LLM Integration
-
-- Privacy-first local inference (llama.cpp)
-- JSON parsing guardrails
-- SOC keyword validation
-- Deterministic rationale generation
-
-### Production-Grade Tooling
-
-- Checkpoint-based resumable generation
-- Real-time progress monitoring
-- Resource efficiency tracking
-- Comprehensive error handling
+| Component | Description |
+|---|---|
+| **Streamlit console** | `app.py` plus `assets/styles.css`. SOC-themed, dark mode only. |
+| **Classifier** | TF-IDF (5000 dims) + sentence-transformer embeddings (384 dims) + Logistic Regression. |
+| **LLM clients** | `HuggingFaceInferenceClient`, `OpenAIClient`, `AnthropicClient`, `LocalLLMClient`. |
+| **Database** | SQLite. History, bookmarks, notes, case status, case timeline, saved searches. |
+| **CLI** | `nlp-triage`. JSON output, bulk processing, LLM second opinion, difficulty modes. |
+| **Notebooks** | 12 Jupyter notebooks covering preprocessing, baselines, evaluation, hybrid models. |
+| **Generator** | LLM-enhanced synthetic dataset creation with monitoring. |
+| **Tests** | Pytest with CI. |
 
 ---
 
-## 📚 Documentation Structure
+## Documentation map
 
 <div class="grid cards" markdown>
 
-- :material-book-open-variant:{ .lg .middle } **User Guide**
+- :material-book-open-variant:{ .lg .middle } **User guide**
 
-  ***
+    ---
 
-  Learn how to use the tools and interfaces
+    [:octicons-arrow-right-24: SOC console walkthrough](ui-guide.md)<br>
+    [:octicons-arrow-right-24: CLI usage](cli.md)<br>
+    [:octicons-arrow-right-24: Configuration and BYOK](configuration.md)<br>
+    [:octicons-arrow-right-24: Dataset generation](data-and-generator.md)
 
-  [:octicons-arrow-right-24: CLI Usage](cli.md)  
-  [:octicons-arrow-right-24: Streamlit UI](ui-guide.md)  
-  [:octicons-arrow-right-24: Dataset Generation](data-and-generator.md)  
-  [:octicons-arrow-right-24: Configuration](configuration.md)
+- :material-cog:{ .lg .middle } **Technical deep dive**
 
-- :material-cog:{ .lg .middle } **Technical Deep Dive**
+    ---
 
-  ***
-
-  Understand the architecture and implementation
-
-  [:octicons-arrow-right-24: Architecture](architecture.md)  
-  [:octicons-arrow-right-24: Model Information](model-information.md)  
-  [:octicons-arrow-right-24: Modeling & Evaluation](modeling-and-eval.md)  
-  [:octicons-arrow-right-24: LLM Integration](llm-integration.md)
+    [:octicons-arrow-right-24: Architecture](architecture.md)<br>
+    [:octicons-arrow-right-24: Model information](model-information.md)<br>
+    [:octicons-arrow-right-24: Modeling and evaluation](modeling-and-eval.md)<br>
+    [:octicons-arrow-right-24: LLM integration](llm-integration.md)
 
 - :material-code-braces:{ .lg .middle } **Development**
 
-  ***
+    ---
 
-  Contribute to the project
-
-  [:octicons-arrow-right-24: Development Guide](development.md)  
-  [:octicons-arrow-right-24: Testing](testing.md)  
-  [:octicons-arrow-right-24: API Reference](api-reference.md)  
-  [:octicons-arrow-right-24: Contributing](contributing.md)
+    [:octicons-arrow-right-24: Development guide](development.md)<br>
+    [:octicons-arrow-right-24: Testing](testing.md)<br>
+    [:octicons-arrow-right-24: API reference](api-reference.md)<br>
+    [:octicons-arrow-right-24: Contributing](contributing.md)
 
 - :material-information:{ .lg .middle } **Reference**
 
-  ***
+    ---
 
-  Additional information and resources
-
-  [:octicons-arrow-right-24: Limitations & Safety](limitations.md)  
-  [:octicons-arrow-right-24: MITRE Attribution](mitre-attribution.md)  
-  [:octicons-arrow-right-24: FAQ](faq.md)  
-  [:octicons-arrow-right-24: Glossary](glossary.md)
+    [:octicons-arrow-right-24: Limitations and safety](limitations.md)<br>
+    [:octicons-arrow-right-24: MITRE attribution](mitre-attribution.md)<br>
+    [:octicons-arrow-right-24: FAQ](faq.md)<br>
+    [:octicons-arrow-right-24: Glossary](glossary.md)
 
 </div>
 
 ---
 
-## 🌟 Project Goals
+## License and attribution
 
-This project aims to demonstrate:
-
-✅ End-to-end ML pipeline from data generation to deployment  
-✅ Uncertainty-aware classification for real-world ambiguity  
-✅ Privacy-first LLM integration for enhanced intelligence  
-✅ Production-grade monitoring and observability  
-✅ Interactive visualizations and analytics  
-✅ Comprehensive documentation and testing
+- License: Apache 2.0. See [LICENSE](https://github.com/texasbe2trill/AlertSage/blob/main/LICENSE).
+- MITRE ATT&CK marks and content used under MITRE's terms of use. See [MITRE attribution](mitre-attribution.md).
 
 ---
 
-## 🤝 Contributing
+## Links
 
-Contributions are welcome! Whether it's:
-
-- 🐛 Bug reports
-- 💡 Feature requests
-- 📖 Documentation improvements
-- 🔧 Code contributions
-
-See our [Contributing Guide](contributing.md) to get started.
-
----
-
-## 📄 License
-
-This project is licensed under the Apache License 2.0. See [LICENSE](https://github.com/texasbe2trill/AlertSage/blob/main/LICENSE) for details.
-
----
-
-## 🔗 Links
-
-- [:fontawesome-brands-github: GitHub Repository](https://github.com/texasbe2trill/AlertSage)
-- [:material-book-open-page-variant: Full Documentation](https://texasbe2trill.github.io/AlertSage/)
-- [:material-bug: Issue Tracker](https://github.com/texasbe2trill/AlertSage/issues)
-- [:material-chat: Discussions](https://github.com/texasbe2trill/AlertSage/discussions)
+- [:fontawesome-brands-github: GitHub repository](https://github.com/texasbe2trill/AlertSage)
+- [:material-rocket-launch: Hosted demo](https://alertsage.streamlit.app/)
+- [:material-bug: Issue tracker](https://github.com/texasbe2trill/AlertSage/issues)

@@ -38,7 +38,7 @@ nlp-triage "EDR detected powershell.exe spawning from Outlook on LAPTOP-093 and 
 
 ### Example output
 
-![](images/cli_output_single_v2.png)
+![](images/cli_output_single.png)
 
 ## Interactive mode usage
 
@@ -48,7 +48,7 @@ nlp-triage
 
 ### Example output
 
-![](images/cli_output_interactive_v2.png)
+![](images/cli_output.png)
 
 ## Bulk file processing
 
@@ -57,11 +57,6 @@ Provide a plain‑text file where each line is an incident description:
 ```bash
 nlp-triage --file incidents.txt
 ```
-
-Example preview:
-
-![](images/cli_output_bulk.png)
-![](images/cli_output_bulk_2.png)
 
 At the end of processing, NLPTriage prints a **batch summary** including:
 - Per‑class distribution
@@ -98,9 +93,9 @@ nlp-triage --difficulty soc-medium "Suspicious PowerShell execution on host."
 ```
 
 Modes:
-- **default** — balanced mode (recommended)
-- **soc-medium** — medium‑strict SOC mode (higher uncertainty marking)
-- **soc-hard** — strict SOC mode (very conservative, many predictions become 'uncertain')
+- **default**: balanced mode (recommended)
+- **soc-medium**: medium‑strict SOC mode (higher uncertainty marking)
+- **soc-hard**: strict SOC mode (very conservative, many predictions become 'uncertain')
 
 ---
 
