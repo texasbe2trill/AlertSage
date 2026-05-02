@@ -1124,6 +1124,76 @@ hr { border-color: var(--soc-border) !important; }
 }
 
 /* ============================================================
+   16g. CASE TIMELINE
+   ============================================================ */
+.soc-timeline {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    position: relative;
+}
+.soc-timeline::before {
+    content: "";
+    position: absolute;
+    top: 0.5rem;
+    bottom: 0.25rem;
+    left: 7px;
+    width: 1px;
+    background: var(--soc-border);
+}
+.soc-timeline__item {
+    position: relative;
+    padding: 0.45rem 0 0.45rem 1.6rem;
+    border-bottom: 1px solid var(--soc-divider);
+}
+.soc-timeline__item:last-child {
+    border-bottom: none;
+}
+.soc-timeline__dot {
+    position: absolute;
+    top: 0.7rem;
+    left: 1px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--soc-text-muted);
+    border: 2px solid var(--soc-bg-elevated);
+    box-shadow: 0 0 0 1px var(--soc-border-strong);
+}
+.soc-timeline__dot.tone-info     { background: var(--soc-info); box-shadow: 0 0 0 1px var(--soc-info); }
+.soc-timeline__dot.tone-accent   { background: var(--soc-accent); box-shadow: 0 0 0 1px var(--soc-accent); }
+.soc-timeline__dot.tone-medium   { background: var(--soc-medium); box-shadow: 0 0 0 1px var(--soc-medium); }
+.soc-timeline__dot.tone-low      { background: var(--soc-low); box-shadow: 0 0 0 1px var(--soc-low); }
+.soc-timeline__dot.tone-high     { background: var(--soc-high); box-shadow: 0 0 0 1px var(--soc-high); }
+.soc-timeline__dot.tone-critical { background: var(--soc-critical); box-shadow: 0 0 0 1px var(--soc-critical); }
+.soc-timeline__dot.tone-muted    { background: var(--soc-text-muted); }
+
+.soc-timeline__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.85rem;
+    margin-bottom: 0.2rem;
+}
+.soc-timeline__kind {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--soc-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.soc-timeline__time {
+    font-size: 0.74rem;
+    color: var(--soc-text-muted);
+}
+.soc-timeline__details {
+    font-size: 0.88rem;
+    color: var(--soc-text);
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+/* ============================================================
    17. EMPTY STATES
    ============================================================ */
 .soc-empty {

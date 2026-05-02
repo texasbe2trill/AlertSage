@@ -459,11 +459,45 @@ def run_llm_second_opinion(
 # CLASSIFIER FRONT-END
 # =============================================================================
 
+def _build_feature_matrix(cleaned_text: str, model_n_features: int):
+    """Build the feature matrix the loaded classifier was trained on.
+
+    The enhanced classifier was trained on TF-IDF (5000 dims) plus
+    sentence-transformer embeddings (384 dims) concatenated horizontally
+    (5384 dims total). The baseline classifier uses TF-IDF only. We
+    branch on the model's `n_features_in_` so both checkpoints work.
+    """
+    from scipy import sparse
+    vectorizer, _ = _classifier()
+    X_tfidf = vectorizer.transform([cleaned_text])
+    n_tfidf = X_tfidf.shape[1]
+    if model_n_features == n_tfidf:
+        return X_tfidf
+    extra = model_n_features - n_tfidf
+    if extra > 0:
+        # Embedding dim should match the gap (384 for all-MiniLM-L6-v2)
+        emb = _embedder().encode(cleaned_text, normalize=True)
+        if hasattr(emb, "ndim") and emb.ndim == 1:
+            emb = emb.reshape(1, -1)
+        if emb.shape[1] != extra:
+            raise ValueError(
+                f"feature mismatch: classifier expects {model_n_features} "
+                f"features but TF-IDF gives {n_tfidf} and embedder gives "
+                f"{emb.shape[1]}"
+            )
+        return sparse.hstack([X_tfidf, sparse.csr_matrix(emb)], format="csr")
+    raise ValueError(
+        f"classifier expects {model_n_features} features but TF-IDF alone "
+        f"gives {n_tfidf}; cannot reconcile."
+    )
+
+
 def predict(text: str, *, threshold: float, max_classes: int) -> dict[str, Any]:
-    """Run the TF-IDF + LogReg classifier and return a normalized result."""
-    vectorizer, model = _classifier()
+    """Run the loaded classifier and return a normalized triage result."""
+    _, model = _classifier()
     cleaned = clean_description(text)
-    X = vectorizer.transform([cleaned])
+    n_features = int(getattr(model, "n_features_in_", 0))
+    X = _build_feature_matrix(cleaned, n_features)
     label = model.predict(X)[0]
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(X)[0]
@@ -989,7 +1023,16 @@ def set_case_status(analysis_id: int | str | None, status: str) -> None:
     if analysis_id in (None, "", 0) or status not in _CASE_STATUS_KEYS:
         return
     try:
+        previous = get_case_status(analysis_id)
         _db().save_setting(_case_status_key(analysis_id), status)
+        if previous != status:
+            label_for = dict((k, l) for k, l, _ in CASE_STATUSES)
+            append_timeline_event(
+                analysis_id,
+                "status",
+                f"Status changed from <strong>{label_for.get(previous, previous)}</strong> "
+                f"to <strong>{label_for.get(status, status)}</strong>.",
+            )
     except Exception as exc:
         st.warning(f"Could not save status: {exc}")
 
@@ -1113,47 +1156,137 @@ def _mock_enrich(ioc: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def render_ioc_panel(text: str) -> str:
+def render_ioc_panel(text: str) -> None:
+    """Render the IOC panel with enrichment + per-IOC pivot expanders.
+
+    This is now a Streamlit component (not pure HTML) because we want
+    each row to expand into a real VirusTotal pivot panel when the
+    analyst clicks. The header row stays semantic; pivots open below.
+    """
     iocs = extract_iocs(text)
+    has_vt_key = bool(_vt_api_key())
+    enrichment_label = "VirusTotal live" if has_vt_key else "demo enrichment"
+
     if not iocs:
-        return (
+        st.markdown(
             '<div class="soc-panel">'
             '<div class="soc-panel__title">Indicators '
             '<span class="soc-meta">no observables found</span></div>'
             '<div style="color: var(--soc-text-muted); font-size: 0.85rem;">'
             'No IPs, hashes, domains, URLs, emails, CVEs, or hostnames '
             'detected in this narrative.</div>'
-            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
         )
-    rows = []
-    for ioc in iocs[:30]:
-        enrichment = _mock_enrich(ioc)
-        rows.append(
-            "<tr>"
-            f'<td class="soc-cell-mono">{ioc["indicator"]}</td>'
-            f'<td><span class="soc-tag soc-mono">{ioc["type"]}</span></td>'
-            f'<td><span class="soc-pill {enrichment["verdict_tone"]}">{enrichment["verdict"]}</span></td>'
-            f'<td class="soc-cell-mono">{enrichment["reputation"]}</td>'
-            f'<td class="soc-cell-mono">{enrichment["first_seen"]}</td>'
-            f'<td class="soc-cell-truncate soc-cell-mono">{enrichment["sources"]}</td>'
-            "</tr>"
-        )
-    note = ""
-    if len(iocs) > 30:
-        note = f' · showing first 30 of {len(iocs)}'
-    return (
-        '<div class="soc-panel">'
+        return
+
+    note = f' · showing first 30 of {len(iocs)}' if len(iocs) > 30 else ""
+    st.markdown(
+        '<div class="soc-panel" style="margin-bottom: 0.4rem;">'
         '<div class="soc-panel__title">Indicators &amp; enrichment '
-        f'<span class="soc-meta">{len(iocs)} observable{"s" if len(iocs) != 1 else ""} · demo enrichment{note}</span></div>'
-        '<table class="soc-table">'
-        "<thead><tr>"
-        "<th>Indicator</th><th>Type</th><th>Verdict</th>"
-        "<th>Score</th><th>First seen</th><th>Sources</th>"
-        "</tr></thead>"
-        f'<tbody>{"".join(rows)}</tbody>'
-        "</table>"
-        '</div>'
+        f'<span class="soc-meta">{len(iocs)} observable{"s" if len(iocs) != 1 else ""} · {enrichment_label}{note}</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
     )
+
+    # Render each IOC as a SOC table row + collapsible pivot
+    for idx, ioc in enumerate(iocs[:30]):
+        enrichment = _enrich_ioc_real_or_mock(ioc)
+        verdict = enrichment.get("verdict", "unknown")
+        verdict_tone = enrichment.get("verdict_tone", "medium")
+        reputation = enrichment.get("reputation", "-")
+        first_seen = enrichment.get("first_seen", "-")
+        sources = enrichment.get("sources", "")
+        attributes = enrichment.get("vt_attributes")
+
+        title = (
+            f"{ioc['indicator']}  ·  {ioc['type']}  ·  "
+            f"{verdict.upper()}  ·  score: {reputation}"
+        )
+        with st.expander(title, expanded=False):
+            cols = st.columns([1, 1, 1, 1])
+            cols[0].markdown(
+                f'<div class="soc-panel__title" style="margin: 0;">Type</div>'
+                f'<span class="soc-tag soc-mono">{ioc["type"]}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[1].markdown(
+                f'<div class="soc-panel__title" style="margin: 0;">Verdict</div>'
+                f'<span class="soc-pill {verdict_tone}">{verdict}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[2].markdown(
+                f'<div class="soc-panel__title" style="margin: 0;">Score</div>'
+                f'<span class="soc-cell-mono">{reputation}</span>',
+                unsafe_allow_html=True,
+            )
+            cols[3].markdown(
+                f'<div class="soc-panel__title" style="margin: 0;">First seen</div>'
+                f'<span class="soc-cell-mono">{first_seen}</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="soc-panel__title" style="margin-top: 0.6rem;">'
+                f'Sources</div>'
+                f'<span class="soc-cell-mono" style="color: var(--soc-text-secondary);">{sources}</span>',
+                unsafe_allow_html=True,
+            )
+
+            # External pivot links
+            pivots = _ioc_pivot_links(ioc)
+            if pivots:
+                pivot_html = " &nbsp; ".join(
+                    f'<a href="{u}" target="_blank" rel="noopener">{lbl}</a>'
+                    for lbl, u in pivots
+                )
+                st.markdown(
+                    f'<div class="soc-panel__title" style="margin-top: 0.7rem;">'
+                    'Pivot</div>'
+                    f'<div style="font-size: 0.85rem;">{pivot_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Live VT attributes
+            if isinstance(attributes, dict):
+                with st.expander("VirusTotal raw attributes", expanded=False):
+                    st.json(attributes)
+
+
+def _ioc_pivot_links(ioc: dict[str, str]) -> list[tuple[str, str]]:
+    """External pivot URLs (VT, Shodan, AbuseIPDB, GreyNoise, MITRE)."""
+    indicator = ioc["indicator"]
+    ioc_type = ioc["type"]
+    links: list[tuple[str, str]] = []
+    if ioc_type in ("ipv4", "ipv6"):
+        links += [
+            ("VirusTotal",  f"https://www.virustotal.com/gui/ip-address/{indicator}"),
+            ("AbuseIPDB",   f"https://www.abuseipdb.com/check/{indicator}"),
+            ("Shodan",      f"https://www.shodan.io/host/{indicator}"),
+            ("GreyNoise",   f"https://viz.greynoise.io/ip/{indicator}"),
+        ]
+    elif ioc_type == "domain":
+        links += [
+            ("VirusTotal",  f"https://www.virustotal.com/gui/domain/{indicator}"),
+            ("URLhaus",     f"https://urlhaus.abuse.ch/browse.php?search={indicator}"),
+            ("Censys",      f"https://search.censys.io/hosts?q={indicator}"),
+        ]
+    elif ioc_type in ("md5", "sha1", "sha256"):
+        links += [
+            ("VirusTotal",  f"https://www.virustotal.com/gui/file/{indicator}"),
+            ("MalwareBazaar", f"https://bazaar.abuse.ch/browse.php?search=sha256%3A{indicator}"),
+        ]
+    elif ioc_type == "url":
+        from urllib.parse import quote
+        links += [
+            ("URLhaus",     f"https://urlhaus.abuse.ch/browse.php?search={quote(indicator)}"),
+            ("VirusTotal",  f"https://www.virustotal.com/gui/search/{quote(indicator)}"),
+        ]
+    elif ioc_type == "cve":
+        links += [
+            ("NVD",         f"https://nvd.nist.gov/vuln/detail/{indicator}"),
+            ("MITRE",       f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={indicator}"),
+        ]
+    return links
 
 
 # =============================================================================
@@ -1235,6 +1368,380 @@ def render_coverage_summary(df: pd.DataFrame) -> str:
         f'<div class="soc-coverage">{"".join(rows)}</div>'
         '</div>'
     )
+
+
+# =============================================================================
+# CASE TIMELINE
+# =============================================================================
+# Events are persisted as a JSON-encoded list under the settings key
+# "case_timeline::{analysis_id}". Adding a status change, a note, or the
+# initial creation appends to this list. The Investigate result and the
+# Bookmarks expander each render the timeline as a vertical narrative.
+
+import json as _json
+
+
+_TIMELINE_KIND_LABELS = {
+    "created":   ("Triage created",  "info"),
+    "llm":       ("LLM rationale",   "accent"),
+    "status":    ("Status change",   "medium"),
+    "note":      ("Analyst note",    "info"),
+    "bookmark":  ("Bookmarked",      "accent"),
+}
+
+
+def _timeline_key(analysis_id: int | str) -> str:
+    return f"case_timeline::{analysis_id}"
+
+
+def get_case_timeline(analysis_id: int | str | None) -> list[dict]:
+    if analysis_id in (None, "", 0):
+        return []
+    try:
+        raw = _db().get_setting(_timeline_key(analysis_id), default="[]")
+        if isinstance(raw, str):
+            entries = _json.loads(raw)
+        elif isinstance(raw, list):
+            entries = raw
+        else:
+            entries = []
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        return []
+
+
+def append_timeline_event(
+    analysis_id: int | str | None,
+    kind: str,
+    details: str,
+    *,
+    extra: dict | None = None,
+) -> None:
+    if analysis_id in (None, "", 0):
+        return
+    entries = get_case_timeline(analysis_id)
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "details": details or "",
+    }
+    if extra:
+        entry["extra"] = extra
+    entries.append(entry)
+    try:
+        _db().save_setting(_timeline_key(analysis_id), _json.dumps(entries))
+    except Exception as exc:
+        st.warning(f"Could not append to case timeline: {exc}")
+
+
+def render_case_timeline(analysis_id: int | str | None) -> str:
+    entries = get_case_timeline(analysis_id)
+    if not entries:
+        return (
+            '<div class="soc-panel">'
+            '<div class="soc-panel__title">Case timeline '
+            '<span class="soc-meta">no events yet</span></div>'
+            '<div style="color: var(--soc-text-muted); font-size: 0.85rem;">'
+            'Status changes and analyst notes will appear here.</div>'
+            '</div>'
+        )
+    items = []
+    for entry in entries:
+        kind = entry.get("kind", "")
+        label, tone = _TIMELINE_KIND_LABELS.get(
+            kind, ("Event", "muted")
+        )
+        try:
+            ts = datetime.fromisoformat(entry.get("ts", "")).astimezone()
+            ts_human = ts.strftime("%b %d %H:%M")
+        except Exception:
+            ts_human = entry.get("ts", "-")[:16]
+        details = (entry.get("details") or "").replace("\n", "<br>")
+        items.append(
+            '<li class="soc-timeline__item">'
+            f'<span class="soc-timeline__dot tone-{tone}"></span>'
+            '<div class="soc-timeline__body">'
+            '<div class="soc-timeline__head">'
+            f'<span class="soc-timeline__kind">{label}</span>'
+            f'<span class="soc-timeline__time soc-mono">{ts_human}</span>'
+            '</div>'
+            f'<div class="soc-timeline__details">{details}</div>'
+            '</div>'
+            '</li>'
+        )
+    return (
+        '<div class="soc-panel">'
+        '<div class="soc-panel__title">Case timeline '
+        f'<span class="soc-meta">{len(entries)} event{"s" if len(entries) != 1 else ""}</span></div>'
+        f'<ul class="soc-timeline">{"".join(items)}</ul>'
+        '</div>'
+    )
+
+
+# =============================================================================
+# SAVED SEARCHES
+# =============================================================================
+# Persisted as a JSON list under the settings key "saved_searches".
+
+_SAVED_SEARCHES_KEY = "saved_searches"
+
+
+def get_saved_searches() -> list[dict]:
+    try:
+        raw = _db().get_setting(_SAVED_SEARCHES_KEY, default="[]")
+        entries = _json.loads(raw) if isinstance(raw, str) else raw
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        return []
+
+
+def save_search(name: str, payload: dict) -> None:
+    if not name.strip():
+        return
+    entries = get_saved_searches()
+    # Replace existing entry with same name (idempotent save)
+    entries = [e for e in entries if e.get("name") != name.strip()]
+    entries.append({
+        "name": name.strip(),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "filters": payload,
+    })
+    try:
+        _db().save_setting(_SAVED_SEARCHES_KEY, _json.dumps(entries))
+    except Exception as exc:
+        st.warning(f"Could not save search: {exc}")
+
+
+def delete_saved_search(name: str) -> None:
+    entries = [e for e in get_saved_searches() if e.get("name") != name]
+    try:
+        _db().save_setting(_SAVED_SEARCHES_KEY, _json.dumps(entries))
+    except Exception as exc:
+        st.warning(f"Could not delete saved search: {exc}")
+
+
+# =============================================================================
+# DEMO DATA GENERATOR
+# =============================================================================
+# When toggled on, a fragment fires every few seconds, picks a random
+# sample narrative, runs it through the classifier, and persists the
+# result. The Overview live tail picks it up automatically and the page
+# starts to feel like a real SOC console even on a fresh database.
+
+_DEMO_FLAG_KEY = "demo_generator_on"
+_DEMO_LAST_KEY = "demo_generator_last"
+_DEMO_COUNT_KEY = "demo_emitted_count"
+_DEMO_LAST_ERR_KEY = "demo_last_error"
+_DEMO_LAST_EMIT_KEY = "demo_last_emit_iso"
+
+
+def demo_generator_active() -> bool:
+    return bool(st.session_state.get(_DEMO_FLAG_KEY, False))
+
+
+def _clear_demo_events() -> int:
+    """Remove demo-generated rows (batch_id = 'demo') from history.
+
+    Best-effort; returns the number of rows deleted. The bookmark/note/
+    settings rows are left intact since they are unlikely to be tied to
+    demo events.
+    """
+    db = _db()
+    try:
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM analysis_history WHERE batch_id = ?",
+                ("demo",),
+            )
+            n = cur.rowcount or 0
+        st.session_state[_DEMO_COUNT_KEY] = 0
+        return n
+    except Exception:
+        return 0
+
+
+def emit_demo_event() -> tuple[int | None, str | None]:
+    """Emit one synthetic incident through the full pipeline.
+
+    Used by both the periodic fragment and the manual "emit now" button
+    in Settings, so we have one path to debug and one path to harden.
+    Returns (analysis_id, error_message). The error string is None on
+    success.
+    """
+    import random as _random
+
+    rng = _random.Random(time.time_ns())
+    label, body = rng.choice(list(EXAMPLE_INCIDENTS.items()))
+    suffix_pool = [
+        f" Source IP: 10.{rng.randint(1, 250)}.{rng.randint(1, 250)}.{rng.randint(2, 254)}.",
+        f" Detection at {datetime.now().strftime('%H:%M:%S')} UTC.",
+        f" Asset: WS-{rng.choice(['FIN', 'HR', 'EXEC', 'IT'])}-{rng.randint(10, 99):02d}.",
+        f" Sensor cluster {rng.choice(['us-east', 'eu-west', 'ap-south'])}-{rng.randint(1, 4)}.",
+    ]
+    text = f"[demo] {body}{rng.choice(suffix_pool)}"
+
+    try:
+        result = predict(
+            text,
+            threshold=float(st.session_state.get("threshold", 0.5)),
+            max_classes=int(st.session_state.get("max_classes", 5)),
+        )
+    except Exception as exc:
+        msg = f"predict() failed: {exc}"
+        st.session_state[_DEMO_LAST_ERR_KEY] = msg
+        return None, msg
+
+    try:
+        aid = _persist_analysis(result, batch_id="demo")
+    except Exception as exc:
+        msg = f"persist failed: {exc}"
+        st.session_state[_DEMO_LAST_ERR_KEY] = msg
+        return None, msg
+
+    if aid:
+        try:
+            append_timeline_event(
+                aid,
+                "created",
+                f"Synthetic event emitted by demo generator. Predicted "
+                f"label: {humanize(result['final_label'])} at "
+                f"{float(result.get('max_prob', 0)):.0%} confidence.",
+            )
+        except Exception:
+            # Timeline seeding is best-effort; the row is already saved.
+            pass
+        st.session_state[_DEMO_COUNT_KEY] = (
+            int(st.session_state.get(_DEMO_COUNT_KEY, 0)) + 1
+        )
+        st.session_state[_DEMO_LAST_EMIT_KEY] = datetime.now(timezone.utc).isoformat()
+        st.session_state[_DEMO_LAST_ERR_KEY] = None
+        return aid, None
+
+    msg = "save_analysis returned no id"
+    st.session_state[_DEMO_LAST_ERR_KEY] = msg
+    return None, msg
+
+
+@st.fragment(run_every="6s")
+def demo_generator_fragment() -> None:
+    """Periodic synthetic-event emitter.
+
+    Mounted globally from main() so it fires regardless of which page
+    the user is on; without that, flipping the toggle in Settings would
+    do nothing until the user navigated to Overview.
+    """
+    if not demo_generator_active():
+        return
+    last = st.session_state.get(_DEMO_LAST_KEY, 0.0)
+    now_ts = time.time()
+    if now_ts - last < 5:
+        return
+    st.session_state[_DEMO_LAST_KEY] = now_ts
+    emit_demo_event()
+
+
+# =============================================================================
+# REAL IOC ENRICHMENT (VirusTotal)
+# =============================================================================
+
+_VT_KEY_SETTING = "vt_api_key"
+
+
+def _vt_api_key() -> str:
+    """Pull a VirusTotal API key from session, then env, then secrets."""
+    return (
+        st.session_state.get(_VT_KEY_SETTING, "")
+        or _env("VIRUSTOTAL_API_KEY", "VT_API_KEY")
+        or _secret("VIRUSTOTAL_API_KEY", "")
+        or _secret("VT_API_KEY", "")
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _vt_lookup(indicator: str, ioc_type: str, key: str) -> dict[str, Any] | None:
+    """Best-effort VirusTotal lookup. Returns None on any failure.
+
+    Cached for 15 minutes so repeat hits on the same indicator do not
+    burn API quota. The cache key includes the API key so swapping keys
+    in Settings does not return stale data.
+    """
+    if not key:
+        return None
+    import requests
+    endpoint = None
+    if ioc_type in ("ipv4", "ipv6"):
+        endpoint = f"https://www.virustotal.com/api/v3/ip_addresses/{indicator}"
+    elif ioc_type == "domain":
+        endpoint = f"https://www.virustotal.com/api/v3/domains/{indicator}"
+    elif ioc_type == "url":
+        url_id = base64.urlsafe_b64encode(indicator.encode()).decode().strip("=")
+        endpoint = f"https://www.virustotal.com/api/v3/urls/{url_id}"
+    elif ioc_type in ("md5", "sha1", "sha256"):
+        endpoint = f"https://www.virustotal.com/api/v3/files/{indicator}"
+    if not endpoint:
+        return None
+    try:
+        resp = requests.get(
+            endpoint,
+            headers={"x-apikey": key, "Accept": "application/json"},
+            timeout=8,
+        )
+        if resp.status_code == 404:
+            return {"verdict": "unknown", "stats": {}, "raw": "not found in VT"}
+        if resp.status_code != 200:
+            return {"verdict": "unknown", "stats": {}, "raw": f"VT {resp.status_code}"}
+        data = resp.json().get("data", {}).get("attributes", {})
+        stats = data.get("last_analysis_stats", {})
+        malicious = int(stats.get("malicious", 0))
+        suspicious = int(stats.get("suspicious", 0))
+        if malicious >= 5:
+            verdict = "malicious"
+        elif malicious >= 1:
+            verdict = "suspicious"
+        elif suspicious >= 1:
+            verdict = "suspicious"
+        else:
+            verdict = "clean"
+        return {
+            "verdict": verdict,
+            "stats": stats,
+            "raw": data,
+        }
+    except Exception:
+        return None
+
+
+def _enrich_ioc_real_or_mock(ioc: dict[str, str]) -> dict[str, Any]:
+    """Combine VT (when key is configured) with the deterministic mock."""
+    mock = _mock_enrich(ioc)
+    key = _vt_api_key()
+    real = _vt_lookup(ioc["indicator"], ioc["type"], key) if key else None
+    if real:
+        verdict = real["verdict"]
+        verdict_tone = {
+            "malicious":  "critical",
+            "suspicious": "high",
+            "unknown":    "medium",
+            "clean":      "low",
+        }.get(verdict, "medium")
+        stats = real.get("stats") or {}
+        malicious = stats.get("malicious")
+        sources = ["VirusTotal"]
+        score_text = (
+            f"{malicious}/{sum(int(v or 0) for v in stats.values())}"
+            if stats and malicious is not None
+            else "live"
+        )
+        return {
+            "reputation": score_text,
+            "verdict": verdict,
+            "verdict_tone": verdict_tone,
+            "first_seen": "live",
+            "sources": ", ".join(sources),
+            "vt_attributes": real.get("raw") if isinstance(real.get("raw"), dict) else None,
+        }
+    return mock
 
 
 # =============================================================================
@@ -1342,6 +1849,61 @@ def render_sidebar() -> None:
         'margin-top: 0.3rem;">Configure in Settings.</div>',
         unsafe_allow_html=True,
     )
+
+    # Saved searches pinned to the sidebar. Clicking applies the filter
+    # set to Hunt and routes the user there.
+    saved = get_saved_searches()
+    if saved:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(
+            '<div style="font-size: 0.66rem; font-weight: 700; '
+            'text-transform: uppercase; letter-spacing: 0.08em; '
+            'color: var(--soc-text-muted); margin: 0.25rem 0 0.4rem 0;">'
+            'Saved searches</div>',
+            unsafe_allow_html=True,
+        )
+        for entry in saved[-6:]:
+            name = entry.get("name", "Unnamed")
+            cols = st.sidebar.columns([5, 1], gap="small")
+            with cols[0]:
+                if st.button(
+                    name,
+                    key=f"saved_{name}",
+                    use_container_width=True,
+                    help="Apply to Hunt",
+                ):
+                    st.session_state["pending_search_filters"] = entry.get(
+                        "filters", {}
+                    )
+                    st.session_state["view"] = "hunt"
+                    st.rerun()
+            with cols[1]:
+                if st.button(
+                    "x",
+                    key=f"saved_del_{name}",
+                    use_container_width=True,
+                    help="Delete saved search",
+                ):
+                    delete_saved_search(name)
+                    st.rerun()
+
+    # Demo data generator status (visible when active so users see why
+    # the live tail keeps moving).
+    if demo_generator_active():
+        st.sidebar.markdown(
+            '<div style="margin-top: 0.6rem; padding: 0.5rem 0.65rem; '
+            'background: rgba(34, 197, 94, 0.10); border: 1px solid '
+            'rgba(34, 197, 94, 0.30); border-radius: 6px;">'
+            '<div style="display:flex; align-items:center; gap:0.45rem; '
+            'font-size: 0.72rem; font-weight: 700; '
+            'color: var(--soc-low); letter-spacing: 0.06em; '
+            'text-transform: uppercase;">'
+            '<span class="soc-live-dot"></span> Demo generator</div>'
+            '<div style="font-size: 0.74rem; color: var(--soc-text-secondary); '
+            'margin-top: 0.25rem;">Synth events every ~7s. Toggle off in Settings.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
 
 # =============================================================================
@@ -1454,9 +2016,9 @@ def view_overview() -> None:
     with left:
         render_section_head(
             "Events over time",
-            f"Last 14 days · {sum(_count_by_day(history, days=14).values())} events",
+            "Last 30 days, brush the slider below to focus a window",
         )
-        fig = _events_over_time_figure(history, days=14)
+        fig = _events_over_time_figure(history, days=30)
         if fig is None:
             render_empty(
                 "No events yet",
@@ -1563,7 +2125,14 @@ def _count_by_day(history: list[dict], days: int = 14) -> dict[str, int]:
     return dict(bucket)
 
 
-def _events_over_time_figure(history: list[dict], days: int = 14):
+def _events_over_time_figure(history: list[dict], days: int = 30):
+    """Stacked bar timechart with a Splunk-style brushable range slider.
+
+    The full window is `days` deep, but the initial visible range is the
+    last 14 days; the analyst can drag the slider handles or shift-drag
+    the chart itself to refocus. Plotly persists the selected range in
+    the URL so deep-links work.
+    """
     cutoff = datetime.now() - timedelta(days=days)
     sev_per_day: dict[str, Counter[str]] = {}
     for h in history:
@@ -1589,15 +2158,54 @@ def _events_over_time_figure(history: list[dict], days: int = 14):
             marker=dict(color=SEVERITY_COLOR_HEX[sev]),
             hovertemplate=f"<b>{sev.upper()}</b><br>%{{x}}: %{{y}} events<extra></extra>",
         ))
+
+    layout = {**PLOT_LAYOUT}
+    # Replace the default xaxis with a brushable one
+    visible_start = (
+        datetime.now() - timedelta(days=14)
+    ).date().isoformat()
+    visible_end = datetime.now().date().isoformat()
+    layout["xaxis"] = dict(
+        showgrid=False,
+        color="#94a3b8",
+        linecolor="#1f2a44",
+        rangeslider=dict(
+            visible=True,
+            thickness=0.10,
+            bgcolor="#0f172a",
+            bordercolor="#1f2a44",
+            borderwidth=1,
+        ),
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1d", step="day", stepmode="backward"),
+                dict(count=7, label="7d", step="day", stepmode="backward"),
+                dict(count=14, label="14d", step="day", stepmode="backward"),
+                dict(count=30, label="30d", step="day", stepmode="backward"),
+                dict(step="all", label="All"),
+            ],
+            bgcolor="#111827",
+            activecolor="#1e293b",
+            bordercolor="#1f2a44",
+            font=dict(color="#cbd5e1", size=10, family="JetBrains Mono"),
+            x=0,
+            xanchor="left",
+            y=1.18,
+            yanchor="top",
+        ),
+        range=[visible_start, visible_end],
+        type="date",
+    )
     fig.update_layout(
         barmode="stack",
-        height=240,
+        height=320,
         showlegend=True,
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, x=0,
+            orientation="h", yanchor="bottom", y=1.04, x=0.55,
+            xanchor="left",
             font=dict(size=10, color="#94a3b8"), bgcolor="rgba(0,0,0,0)",
         ),
-        **PLOT_LAYOUT,
+        **layout,
     )
     return fig
 
@@ -1769,10 +2377,15 @@ def view_investigate() -> None:
 
 
 def _persist_analysis(result: dict, batch_id: str | None) -> int | None:
-    """Save an analysis to the DB. Best-effort; returns id or None."""
+    """Save an analysis to the DB. Best-effort; returns id or None.
+
+    On success, also seeds the case timeline with a 'created' event and
+    a 'llm' event (when an LLM opinion is present), so the timeline
+    panel always has something to show on the result card.
+    """
     try:
         db = _db()
-        return db.save_analysis(
+        analysis_id = db.save_analysis(
             incident_text=result["incident_text"],
             final_label=result["final_label"],
             max_prob=float(result.get("max_prob", 0)),
@@ -1790,6 +2403,32 @@ def _persist_analysis(result: dict, batch_id: str | None) -> int | None:
             },
             batch_id=batch_id,
         )
+        if analysis_id and not batch_id:
+            try:
+                conf = float(result.get("max_prob", 0))
+                append_timeline_event(
+                    analysis_id,
+                    "created",
+                    f"Triage created · {humanize(result['final_label'])} "
+                    f"at {conf:.0%} confidence "
+                    f"(classifier {result.get('classifier_ms', '-')}ms).",
+                )
+                if result.get("llm_opinion"):
+                    rationale = (
+                        result["llm_opinion"].get("rationale", "")
+                        or "(no rationale returned)"
+                    )
+                    rationale_short = (
+                        rationale[:280] + ("..." if len(rationale) > 280 else "")
+                    )
+                    append_timeline_event(
+                        analysis_id,
+                        "llm",
+                        f"LLM second opinion: {rationale_short}",
+                    )
+            except Exception:
+                pass
+        return analysis_id
     except Exception as exc:
         st.warning(f"Could not persist to history: {exc}")
         return None
@@ -1857,8 +2496,12 @@ def render_analysis_result(result: dict) -> None:
     # Kill chain stretches the full width above the two-column body.
     st.markdown(render_kill_chain(techniques), unsafe_allow_html=True)
 
-    # IOC enrichment panel (full width, below kill chain).
-    st.markdown(render_ioc_panel(result["incident_text"]), unsafe_allow_html=True)
+    # IOC enrichment panel (full width, below kill chain). This is now a
+    # Streamlit component (with per-IOC pivot expanders), not pure HTML.
+    render_ioc_panel(result["incident_text"])
+
+    # Case timeline runs the full width above the two-column body.
+    st.markdown(render_case_timeline(aid), unsafe_allow_html=True)
 
     # Two columns: probabilities + LLM panel
     col_a, col_b = st.columns([5, 6], gap="large")
@@ -1959,6 +2602,9 @@ def render_analysis_result(result: dict) -> None:
                     if aid:
                         try:
                             _db().add_note(int(aid), note_text)
+                            append_timeline_event(
+                                int(aid), "note", note_text or "(empty note)"
+                            )
                             st.success("Note saved.")
                             st.session_state["adding_note"] = False
                         except Exception as exc:
@@ -1977,6 +2623,7 @@ def _bookmark_current(result: dict) -> None:
         return
     try:
         _db().add_bookmark(int(aid), note="")
+        append_timeline_event(int(aid), "bookmark", "Saved as a bookmark.")
         st.success("Bookmarked.")
     except Exception as exc:
         st.error(f"Could not bookmark: {exc}")
@@ -2008,39 +2655,83 @@ def view_hunt() -> None:
         )
         return
 
+    # If the user clicked a saved search in the sidebar, prefill the
+    # filters from the pending payload (one-shot apply).
+    pending = st.session_state.pop("pending_search_filters", None) or {}
+    default_query = pending.get("query", "")
+    default_labels = pending.get("label_filter", []) or []
+    default_sev = pending.get("sev_filter", []) or []
+    default_min_conf = float(pending.get("min_conf", 0.0))
+    default_min_anomaly = int(pending.get("min_anomaly", 0))
+    default_time_window = pending.get("time_window", "All time")
+
     # Filters: row 1 (query, classification, severity)
     row1 = st.columns([3, 2, 2], gap="small")
     with row1[0]:
         query = st.text_input(
             "Search narrative",
-            value="",
+            value=default_query,
             placeholder="Free text matched against the narrative...",
         )
     with row1[1]:
         all_labels = sorted({h.get("final_label", "uncertain") for h in history})
         label_filter = st.multiselect(
-            "Classification", all_labels, default=[], placeholder="All classifications"
+            "Classification", all_labels,
+            default=[l for l in default_labels if l in all_labels],
+            placeholder="All classifications",
         )
     with row1[2]:
         sev_filter = st.multiselect(
             "Severity",
             ["critical", "high", "medium", "low", "info"],
-            default=[],
+            default=[s for s in default_sev
+                     if s in ["critical", "high", "medium", "low", "info"]],
             placeholder="All severities",
         )
 
     # Filters: row 2 (confidence, anomaly score, time window)
     row2 = st.columns([2, 2, 2], gap="small")
     with row2[0]:
-        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.0, 0.05)
+        min_conf = st.slider("Min confidence", 0.0, 1.0, default_min_conf, 0.05)
     with row2[1]:
-        min_anomaly = st.slider("Min anomaly score", 0, 100, 0, 5)
+        min_anomaly = st.slider("Min anomaly score", 0, 100, default_min_anomaly, 5)
     with row2[2]:
-        time_window = st.selectbox(
-            "Time window",
-            ["All time", "Last hour", "Last 24 hours", "Last 7 days", "Last 30 days"],
-            index=0,
+        time_window_options = [
+            "All time", "Last hour", "Last 24 hours",
+            "Last 7 days", "Last 30 days",
+        ]
+        idx = (
+            time_window_options.index(default_time_window)
+            if default_time_window in time_window_options else 0
         )
+        time_window = st.selectbox(
+            "Time window", time_window_options, index=idx,
+        )
+
+    # Save-current-search row
+    save_row = st.columns([3, 1], gap="small")
+    with save_row[0]:
+        save_name = st.text_input(
+            "Save this search as",
+            value="",
+            placeholder="e.g. 'High-severity last 24h', 'Phishing only'",
+            key="hunt_save_name",
+        )
+    with save_row[1]:
+        st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+        if st.button(
+            "Save search", use_container_width=True, key="hunt_save_btn",
+            disabled=not save_name.strip(),
+        ):
+            save_search(save_name, {
+                "query": query,
+                "label_filter": label_filter,
+                "sev_filter": sev_filter,
+                "min_conf": min_conf,
+                "min_anomaly": min_anomaly,
+                "time_window": time_window,
+            })
+            st.toast(f"Saved: {save_name}", icon=None)
 
     # Apply filters
     now = datetime.now()
@@ -2426,6 +3117,13 @@ def view_bookmarks() -> None:
                     unsafe_allow_html=True,
                 )
 
+            # Case timeline (status changes + notes + bookmarks)
+            if analysis_id:
+                st.markdown(
+                    render_case_timeline(analysis_id),
+                    unsafe_allow_html=True,
+                )
+
 
 # =============================================================================
 # SETTINGS PAGE
@@ -2516,6 +3214,132 @@ def view_settings() -> None:
             value=bool(st.session_state.get("use_preprocessing", True)),
             key="settings_preproc",
         )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---- Threat intel enrichment ----
+    st.markdown(
+        '<div class="soc-panel">'
+        '<div class="soc-panel__title">Threat intel enrichment</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns([3, 2], gap="medium")
+    with cols[0]:
+        st.markdown(
+            'Pasting a VirusTotal API key here switches the IOC '
+            'enrichment panel from the deterministic mock to a live '
+            'lookup. Free-tier keys work; results are cached for 15 '
+            'minutes per indicator.'
+        )
+    with cols[1]:
+        existing = st.session_state.get(_VT_KEY_SETTING, "")
+        st.session_state["vt_byo_key"] = st.checkbox(
+            "Bring my own VT key",
+            value=bool(st.session_state.get("vt_byo_key", False)),
+            key="settings_vt_byo",
+        )
+        if st.session_state["vt_byo_key"]:
+            entered = st.text_input(
+                "VirusTotal API key",
+                value="",
+                type="password",
+                placeholder="Paste key, session only",
+                key="settings_vt_key",
+            )
+            if entered:
+                st.session_state[_VT_KEY_SETTING] = entered.strip()
+                st.toast("VT key set for this session.", icon=None)
+        st.caption(
+            "Live VT lookup active." if existing
+            else "Mocked enrichment. Add a key to enable live VT."
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---- Demo data generator ----
+    st.markdown(
+        '<div class="soc-panel">'
+        '<div class="soc-panel__title">Demo data generator '
+        '<span class="soc-meta">populates the live tail with synthetic events</span></div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns([3, 2], gap="medium")
+    with cols[0]:
+        st.markdown(
+            'When on, AlertSage emits one synthetic incident every '
+            '~6 seconds drawn from a curated set of phishing, malware, '
+            'access abuse, web attack, exfiltration, and benign '
+            'narratives. Each event is classified, persisted, and '
+            'seeded into the case timeline. The Overview live tail '
+            'picks them up automatically.'
+        )
+    with cols[1]:
+        active = st.checkbox(
+            "Run demo generator",
+            value=bool(st.session_state.get(_DEMO_FLAG_KEY, False)),
+            key="settings_demo_flag",
+        )
+        st.session_state[_DEMO_FLAG_KEY] = active
+        st.caption(
+            "Auto-emitting every ~6s." if active
+            else "Off. Only your own triage runs will appear."
+        )
+
+        emit_cols = st.columns(2, gap="small")
+        with emit_cols[0]:
+            if st.button(
+                "Emit one now",
+                use_container_width=True,
+                key="settings_demo_emit_one",
+                type="primary",
+            ):
+                aid, err = emit_demo_event()
+                if err:
+                    st.error(err)
+                else:
+                    st.toast(f"Emitted event #{aid}.", icon=None)
+                    st.rerun()
+        with emit_cols[1]:
+            if st.button(
+                "Clear demo events",
+                use_container_width=True,
+                key="settings_demo_clear",
+                type="secondary",
+            ):
+                n = _clear_demo_events()
+                st.toast(f"Removed {n} demo events.", icon=None)
+
+    # Status row: count + last emit + last error
+    count = int(st.session_state.get(_DEMO_COUNT_KEY, 0))
+    last_emit = st.session_state.get(_DEMO_LAST_EMIT_KEY)
+    last_err = st.session_state.get(_DEMO_LAST_ERR_KEY)
+
+    last_emit_str = "never"
+    if last_emit:
+        try:
+            ts = datetime.fromisoformat(last_emit).astimezone()
+            last_emit_str = ts.strftime("%H:%M:%S")
+        except Exception:
+            last_emit_str = str(last_emit)[:19]
+
+    status_cols = st.columns(3, gap="small")
+    status_cols[0].markdown(
+        '<div class="soc-panel__title" style="margin: 0;">Emitted this session</div>'
+        f'<span class="soc-cell-mono" style="font-size: 1.1rem; '
+        f'color: var(--soc-text-strong);">{count}</span>',
+        unsafe_allow_html=True,
+    )
+    status_cols[1].markdown(
+        '<div class="soc-panel__title" style="margin: 0;">Last emit</div>'
+        f'<span class="soc-cell-mono" style="color: var(--soc-text-secondary);">{last_emit_str}</span>',
+        unsafe_allow_html=True,
+    )
+    status_cols[2].markdown(
+        '<div class="soc-panel__title" style="margin: 0;">Last error</div>'
+        f'<span class="soc-cell-mono" style="color: '
+        f'{"var(--soc-danger)" if last_err else "var(--soc-text-muted)"};">'
+        f'{last_err or "none"}</span>',
+        unsafe_allow_html=True,
+    )
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     # About
@@ -2657,6 +3481,12 @@ def main() -> None:
     render_sidebar()
     view = st.session_state.get("view", "overview")
     render_topbar(view)
+
+    # Demo data generator is mounted at the top level so synthetic events
+    # stream regardless of which page the analyst is on. The fragment
+    # self-checks the toggle and is a no-op when off, so leaving it
+    # always-mounted is cheap.
+    demo_generator_fragment()
 
     if view == "overview":
         view_overview()
