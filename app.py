@@ -183,6 +183,21 @@ THREAT_FEED: list[dict[str, str]] = [
     },
 ]
 
+# Maps the curated EXAMPLE_INCIDENTS keys to the canonical taxonomy
+# label so seed_historical_events can synthesize realistic-looking
+# events without invoking the classifier on every row (which would
+# block the request thread long enough to trip the WebSocket
+# heartbeat).
+EXAMPLE_LABEL_MAP: dict[str, str] = {
+    "Phishing":          "phishing",
+    "Data exfiltration": "data_exfiltration",
+    "Malware":           "malware",
+    "Access abuse":      "access_abuse",
+    "Web attack":        "web_attack",
+    "Benign activity":   "benign_activity",
+}
+
+
 EXAMPLE_INCIDENTS = {
     "Phishing": (
         "Multiple users in the finance department received an email "
@@ -928,19 +943,20 @@ def render_threat_feed() -> str:
     )
 
 
-@st.fragment(run_every="5s")
+@st.fragment(run_every="8s")
 def render_live_tail_fragment(n: int = 6) -> None:
     """Auto-refreshing live tail.
 
-    Re-queries the database every 5 seconds and re-renders independently
+    Re-queries the database every 8 seconds and re-renders independently
     of the rest of the page. The user sees new triage events flow in
-    without a manual refresh.
+    without a manual refresh. Wrapped in try/except so a transient DB
+    lock can't crash the page.
     """
     try:
         history = _db().get_analysis_history(limit=200) or []
-    except Exception:
-        history = []
-    st.markdown(render_live_tail(history, n=n), unsafe_allow_html=True)
+        st.markdown(render_live_tail(history, n=n), unsafe_allow_html=True)
+    except Exception as exc:
+        _fragment_error_box("Live tail", exc)
 
 
 def render_live_tail(history: list[dict], n: int = 8) -> str:
@@ -1543,14 +1559,15 @@ def seed_historical_events(days: int = 30, count: int = 150) -> tuple[int, str |
     """Backfill `count` synthetic events spread across the last `days`.
 
     Used to populate the Overview charts on a fresh install or after a
-    `Clear demo events` so the dashboard looks lived-in immediately. The
-    timestamps follow a slightly-skewed distribution (more recent days
-    get more events) and a business-hour bias so the daily bars vary
-    naturally.
+    Clear demo events so the dashboard looks lived-in immediately.
 
-    Returns (rows_inserted, error_or_None). Each row is classified
-    through the real pipeline so MITRE mapping and severity tiers
-    populate correctly.
+    Performance note: this used to call `predict()` per row, which loads
+    sentence-transformer embeddings and ran 5 to 30 seconds blocking
+    long enough to trip Streamlit's WebSocket heartbeat. The classifier
+    isn't adding signal here (we picked the example's category, so we
+    know its label), so this version uses `EXAMPLE_LABEL_MAP` for
+    deterministic labels and a single batched INSERT. Total runtime is
+    under a second for 200 rows.
     """
     import random as _random
 
@@ -1568,77 +1585,88 @@ def seed_historical_events(days: int = 30, count: int = 150) -> tuple[int, str |
     regions = ["us-east", "eu-west", "ap-south", "us-west", "eu-north"]
     tags = ["FIN", "HR", "EXEC", "IT", "OPS", "DEV"]
 
-    inserted = 0
+    rows: list[tuple] = []
     now = datetime.now()
+    threshold_value = float(st.session_state.get("threshold", 0.5))
+
+    for _ in range(count):
+        # Skewed distribution: bias toward recent days
+        day_offset = int(rng.triangular(0, days - 1, 0))
+        hour = rng.randint(7, 21) if rng.random() > 0.15 else rng.randint(0, 23)
+        minute = rng.randint(0, 59)
+        second = rng.randint(0, 59)
+        event_dt = now - timedelta(days=day_offset)
+        event_dt = event_dt.replace(
+            hour=hour, minute=minute, second=second, microsecond=0
+        )
+
+        example_name, body = rng.choice(examples)
+        canonical_label = EXAMPLE_LABEL_MAP.get(example_name, "uncertain")
+
+        # Synthesize a confidence score with a realistic distribution.
+        # Most events are mid-confidence; a few drop into the uncertain
+        # band so the histogram + uncertainty stats look honest.
+        roll = rng.random()
+        if roll < 0.05:
+            # Low-confidence: triangular [0.30, 0.55] biased toward 0.45
+            max_prob = rng.triangular(0.30, 0.55, 0.45)
+            final_label = "uncertain"
+            uncertainty = "low"
+        elif roll < 0.20:
+            max_prob = rng.triangular(0.55, 0.75, 0.65)
+            final_label = canonical_label
+            uncertainty = "medium"
+        else:
+            max_prob = rng.triangular(0.70, 0.95, 0.85)
+            final_label = canonical_label
+            uncertainty = "high"
+
+        suffix_template = rng.choice(suffix_pool)
+        suffix = suffix_template.format(
+            a=rng.randint(1, 250),
+            b=rng.randint(1, 250),
+            c=rng.randint(2, 254),
+            tag=rng.choice(tags),
+            n=rng.randint(10, 99),
+            region=rng.choice(regions),
+            idx=rng.randint(1, 4),
+            ts=rng.randint(10000, 99999),
+        )
+        text = f"[demo] {body}{suffix}"
+
+        rows.append((
+            event_dt.isoformat(),
+            text,
+            final_label,
+            float(max_prob),
+            uncertainty,
+            "demo",
+            "default",
+            threshold_value,
+            0,
+            None,
+            "demo",
+        ))
+
+    inserted = 0
     try:
-        for _ in range(count):
-            # Skewed distribution: bias toward recent days
-            day_offset = int(rng.triangular(0, days - 1, 0))
-            # Business-hour bias: 7am - 9pm
-            hour = rng.randint(7, 21) if rng.random() > 0.15 else rng.randint(0, 23)
-            minute = rng.randint(0, 59)
-            second = rng.randint(0, 59)
-            event_dt = now - timedelta(days=day_offset)
-            event_dt = event_dt.replace(
-                hour=hour, minute=minute, second=second, microsecond=0
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.executemany(
+                """
+                INSERT INTO analysis_history
+                (timestamp, incident_text, final_label, max_prob,
+                 uncertainty_level, analysis_mode, difficulty,
+                 threshold, use_llm, raw_result, batch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
-
-            label, body = rng.choice(examples)
-            suffix_template = rng.choice(suffix_pool)
-            suffix = suffix_template.format(
-                a=rng.randint(1, 250),
-                b=rng.randint(1, 250),
-                c=rng.randint(2, 254),
-                tag=rng.choice(tags),
-                n=rng.randint(10, 99),
-                region=rng.choice(regions),
-                idx=rng.randint(1, 4),
-                ts=rng.randint(10000, 99999),
-            )
-            text = f"[demo] {body}{suffix}"
-
-            try:
-                result = predict(
-                    text,
-                    threshold=float(st.session_state.get("threshold", 0.5)),
-                    max_classes=int(st.session_state.get("max_classes", 5)),
-                )
-            except Exception as exc:
-                return inserted, f"predict failed at row {inserted}: {exc}"
-
-            # Persist directly with a backdated timestamp so the chart
-            # spreads across the full window. We bypass _persist_analysis
-            # because that helper uses datetime.now() inside save_analysis.
-            try:
-                with db.get_connection() as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        """
-                        INSERT INTO analysis_history
-                        (timestamp, incident_text, final_label, max_prob,
-                         uncertainty_level, analysis_mode, difficulty,
-                         threshold, use_llm, raw_result, batch_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            event_dt.isoformat(),
-                            text,
-                            result["final_label"],
-                            float(result.get("max_prob", 0)),
-                            result.get("uncertainty_level"),
-                            "demo",
-                            "default",
-                            float(st.session_state.get("threshold", 0.5)),
-                            0,
-                            None,
-                            "demo",
-                        ),
-                    )
-                    inserted += 1
-            except Exception as exc:
-                return inserted, f"persist failed at row {inserted}: {exc}"
+            inserted = cur.rowcount or len(rows)
+    except Exception as exc:
+        return inserted, f"persist failed: {exc}"
     finally:
-        # Bust the cached history snapshot so the Overview fragments
+        # Bust the cached history snapshots so the Overview fragments
         # repaint with the new rows on the next refresh.
         try:
             _overview_history_snapshot.clear()
@@ -1733,22 +1761,28 @@ def emit_demo_event() -> tuple[int | None, str | None]:
     return None, msg
 
 
-@st.fragment(run_every="6s")
+@st.fragment(run_every="8s")
 def demo_generator_fragment() -> None:
     """Periodic synthetic-event emitter.
 
     Mounted globally from main() so it fires regardless of which page
     the user is on; without that, flipping the toggle in Settings would
     do nothing until the user navigated to Overview.
+
+    Wrapped in a try/except so a network blip on the LLM provider or a
+    transient DB lock cannot bubble up and tear down the page.
     """
     if not demo_generator_active():
         return
     last = st.session_state.get(_DEMO_LAST_KEY, 0.0)
     now_ts = time.time()
-    if now_ts - last < 5:
+    if now_ts - last < 7:
         return
     st.session_state[_DEMO_LAST_KEY] = now_ts
-    emit_demo_event()
+    try:
+        emit_demo_event()
+    except Exception as exc:
+        st.session_state[_DEMO_LAST_ERR_KEY] = f"fragment: {exc}"
 
 
 # =============================================================================
@@ -2022,21 +2056,22 @@ def render_sidebar() -> None:
 
 # --- Cached snapshot helpers (shared across all live Overview fragments) ---
 
-@st.cache_data(ttl=4, show_spinner=False)
+@st.cache_data(ttl=8, show_spinner=False)
 def _overview_history_snapshot(_cache_bust: float) -> list[dict]:
     """Return the most recent triage history.
 
-    Cached for 4 seconds so the four data fragments on Overview share
-    one DB hit per refresh cycle. The argument is a cache buster the
-    fragments pass through so the cache invalidates when needed.
+    Cached for 8 seconds so the data fragments on Overview share one DB
+    hit per refresh cycle. The argument is a cache buster the fragments
+    pass through so the cache invalidates when needed (used by the seed
+    function to force a refresh).
     """
     try:
-        return _db().get_analysis_history(limit=10000) or []
+        return _db().get_analysis_history(limit=2000) or []
     except Exception:
         return []
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def _overview_meta_snapshot() -> dict[str, int]:
     try:
         return {
@@ -2048,8 +2083,8 @@ def _overview_meta_snapshot() -> dict[str, int]:
 
 
 def _history_bucket_key() -> float:
-    """Bucket the cache key into 4 second windows so fragments collide."""
-    return float(int(time.time() // 4))
+    """Bucket the cache key into 8 second windows so fragments collide."""
+    return float(int(time.time() // 8))
 
 
 def _compute_overview_stats(history: list[dict]) -> dict[str, Any]:
@@ -2086,11 +2121,29 @@ def _compute_overview_stats(history: list[dict]) -> dict[str, Any]:
 
 # --- Live Overview fragments ----------------------------------------------
 
-@st.fragment(run_every="6s")
+def _fragment_error_box(name: str, exc: Exception) -> None:
+    """Render a small error block inside a fragment body.
+
+    Used so an exception in one fragment doesn't tear down the page.
+    """
+    st.markdown(
+        '<div class="soc-empty">'
+        f'<div class="soc-empty__title">{name} unavailable</div>'
+        f'<div class="soc-empty__hint">{type(exc).__name__}: {exc}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment(run_every="10s")
 def _overview_kpi_fragment() -> None:
-    history = _overview_history_snapshot(_history_bucket_key())
-    meta = _overview_meta_snapshot()
-    stats = _compute_overview_stats(history)
+    try:
+        history = _overview_history_snapshot(_history_bucket_key())
+        meta = _overview_meta_snapshot()
+        stats = _compute_overview_stats(history)
+    except Exception as exc:
+        _fragment_error_box("KPI strip", exc)
+        return
     total = stats["total"]
     high_severity = stats["high_severity"]
     h_24 = stats["h_24"]
@@ -2132,11 +2185,15 @@ def _overview_kpi_fragment() -> None:
     ), unsafe_allow_html=True)
 
 
-@st.fragment(run_every="6s")
+@st.fragment(run_every="10s")
 def _overview_charts_fragment() -> None:
     """Events-over-time + confidence histogram + severity donut."""
-    history = _overview_history_snapshot(_history_bucket_key())
-    stats = _compute_overview_stats(history)
+    try:
+        history = _overview_history_snapshot(_history_bucket_key())
+        stats = _compute_overview_stats(history)
+    except Exception as exc:
+        _fragment_error_box("Charts", exc)
+        return
 
     render_section_head(
         "Events over time",
@@ -2173,9 +2230,13 @@ def _overview_charts_fragment() -> None:
             )
 
 
-@st.fragment(run_every="8s")
+@st.fragment(run_every="15s")
 def _overview_mitre_fragment() -> None:
-    history = _overview_history_snapshot(_history_bucket_key())
+    try:
+        history = _overview_history_snapshot(_history_bucket_key())
+    except Exception as exc:
+        _fragment_error_box("MITRE heatmap", exc)
+        return
     render_section_head("MITRE ATT&CK coverage", "tactic x technique density")
     heatmap_fig = _mitre_heatmap_figure(history)
     if heatmap_fig is None:
@@ -2187,10 +2248,14 @@ def _overview_mitre_fragment() -> None:
         st.plotly_chart(heatmap_fig, use_container_width=True, key="ovw_chart_mitre")
 
 
-@st.fragment(run_every="8s")
+@st.fragment(run_every="12s")
 def _overview_top_labels_fragment() -> None:
-    history = _overview_history_snapshot(_history_bucket_key())
-    stats = _compute_overview_stats(history)
+    try:
+        history = _overview_history_snapshot(_history_bucket_key())
+        stats = _compute_overview_stats(history)
+    except Exception as exc:
+        _fragment_error_box("Top classifications", exc)
+        return
     label_counts: Counter[str] = stats["label_counts"]
     render_section_head("Top classifications", "by count")
     if not label_counts:
@@ -2221,9 +2286,13 @@ def _overview_top_labels_fragment() -> None:
     )
 
 
-@st.fragment(run_every="6s")
+@st.fragment(run_every="10s")
 def _overview_recent_table_fragment() -> None:
-    history = _overview_history_snapshot(_history_bucket_key())
+    try:
+        history = _overview_history_snapshot(_history_bucket_key())
+    except Exception as exc:
+        _fragment_error_box("Recent events", exc)
+        return
     render_section_head("Recent events", action="latest 10")
     recent = sorted(history, key=lambda x: x.get("timestamp", ""), reverse=True)[:10]
     if not recent:
