@@ -85,29 +85,10 @@ html, body, .stApp,
     color: var(--soc-text) !important;
 }
 
-/* Streamlit's top chrome.
- *
- * Make the header transparent so it visually disappears against the
- * page background, kill its shadow and bottom border, and hide the
- * share/deploy toolbar plus the gradient decoration strip. Do NOT
- * zero its height: that hides the in-sidebar collapse chevron and
- * traps users on mobile.
- *
- * Sidebar collapse anatomy in Streamlit 1.39:
- *  - [data-testid="stSidebarCollapseButton"] is the chevron rendered
- *    INSIDE the open sidebar. Used to dismiss it.
- *  - [data-testid="stSidebarCollapsedControl"] is a position: fixed
- *    floating restore button rendered AS A SIBLING of the sidebar
- *    (always present in the DOM, anchored top-left of the viewport
- *    via theme spacing). Streamlit relies on the open sidebar to
- *    naturally cover it via stacking order; when the sidebar
- *    translates offscreen, the floating control becomes visible.
- *
- * Important: do not raise this control's z-index, do not pin it
- * with !important pointer-events / display rules. Doing so puts it
- * on top of the open sidebar nav and eats nav-item clicks. Limit
- * ourselves to surface theming and a11y tap-target sizing.
- */
+/* Streamlit's top chrome: make the header transparent and hide the
+ * deploy toolbar plus the gradient decoration strip. The sidebar
+ * collapse chevron and floating restore control are intentionally
+ * left to Streamlit's defaults so the native UX renders untouched. */
 [data-testid="stHeader"] {
     background: transparent !important;
     box-shadow: none !important;
@@ -116,45 +97,6 @@ html, body, .stApp,
 [data-testid="stToolbar"],
 [data-testid="stDecoration"] {
     display: none !important;
-}
-[data-testid="stSidebarCollapsedControl"] {
-    background: var(--soc-surface);
-    border: 1px solid var(--soc-border);
-    color: var(--soc-text);
-    border-radius: var(--soc-radius-sm);
-    box-shadow: var(--soc-shadow-md);
-}
-[data-testid="stSidebarCollapsedControl"] svg {
-    color: var(--soc-text);
-    fill: currentColor;
-}
-/* Mobile and small tablets: the .soc-topbar renders inline at the top
- * of the main content (y range roughly 16 to 101) and visually swallows
- * the floating restore chevron, which Streamlit pins at top: 20px
- * left: 24px. Even though z-index keeps the chevron on top in hit
- * testing, dark-on-dark theming made it invisible against the topbar
- * and finger taps on its edges occasionally landed on the topbar
- * instead. Below 1100px (where the topbar is in its compact form):
- *   - move the chevron below the topbar on the y axis so it lives in
- *     unobstructed space.
- *   - tint it with the accent color so it reads as a primary action
- *     against the dark page background.
- *   - bump tap target to 44x44 for a11y. */
-@media (max-width: 1100px) {
-    [data-testid="stSidebarCollapsedControl"] {
-        top: 110px !important;
-        background: var(--soc-accent) !important;
-        border-color: var(--soc-accent) !important;
-        color: var(--soc-accent-on) !important;
-    }
-    [data-testid="stSidebarCollapsedControl"] svg {
-        color: var(--soc-accent-on);
-    }
-    [data-testid="stSidebarCollapseButton"],
-    [data-testid="stSidebarCollapsedControl"] button {
-        min-width: 44px;
-        min-height: 44px;
-    }
 }
 
 .block-container {
@@ -455,74 +397,7 @@ hr { border-color: var(--soc-border) !important; }
 }
 
 /* ============================================================
-   8. SOC TOP BAR
-   ============================================================ */
-.soc-topbar {
-    background: var(--soc-bg-elevated);
-    border-bottom: 1px solid var(--soc-border);
-    padding: 0.55rem 1.25rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: -0.75rem -1.5rem 1rem -1.5rem;
-    gap: 1.25rem;
-}
-.soc-topbar__brand {
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    font-weight: 800;
-    font-size: 1.05rem;
-    letter-spacing: -0.01em;
-    color: var(--soc-text-strong);
-}
-.soc-topbar__brand-tag {
-    font-size: 0.65rem;
-    padding: 0.18rem 0.5rem;
-    background: var(--soc-accent-soft);
-    color: var(--soc-accent);
-    border-radius: var(--soc-radius-sm);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    border: 1px solid rgba(59, 130, 246, 0.25);
-}
-.soc-topbar__center {
-    flex: 1;
-    color: var(--soc-text-muted);
-    font-size: 0.82rem;
-    text-align: center;
-    font-family: 'JetBrains Mono', monospace;
-}
-.soc-topbar__status {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-}
-.soc-status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.25rem 0.6rem;
-    border-radius: var(--soc-radius-pill, 999px);
-    background: var(--soc-surface);
-    border: 1px solid var(--soc-border);
-    font-size: 0.74rem;
-    font-weight: 500;
-    color: var(--soc-text-secondary);
-}
-.soc-status-pill .dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--soc-low);
-    box-shadow: 0 0 6px var(--soc-low-soft);
-}
-.soc-status-pill.warning .dot { background: var(--soc-medium); box-shadow: 0 0 6px var(--soc-medium-soft); }
-.soc-status-pill.danger  .dot { background: var(--soc-critical); box-shadow: 0 0 6px var(--soc-critical-soft); }
-.soc-status-pill.info    .dot { background: var(--soc-info); }
-
-/* ============================================================
-   9. SOC PAGE HEADER
+   8. SOC PAGE HEADER
    ============================================================ */
 .soc-page {
     margin: 0 0 1rem 0;
@@ -1330,9 +1205,7 @@ hr { border-color: var(--soc-border) !important; }
    20. RESPONSIVE
    ============================================================ */
 @media (max-width: 1100px) {
-    .soc-topbar__center { display: none; }
     .block-container { padding: 0.5rem 1rem 1.5rem 1rem !important; }
-    .soc-topbar { margin: -0.5rem -1rem 0.85rem -1rem; }
 }
 
 /* Fix Streamlit dataframe colors (used in Hunt/Bookmarks) */
