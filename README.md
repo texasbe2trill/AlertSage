@@ -1,344 +1,213 @@
+<div align="center">
+
+<img src="assets/icons/alertsage-logo.svg" alt="AlertSage logo" width="120" />
+
 # AlertSage
 
-> A SOC-style incident triage console that classifies free-text security alerts, maps them to MITRE ATT&CK, and routes them through your LLM of choice. Open-source, dark-mode-first, modeled on production SIEM consoles.
+### Intelligent security triage, in the time it takes to read the alert.
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![Streamlit](https://img.shields.io/badge/streamlit-1.39%2B-FF4B4B.svg)](https://streamlit.io/)
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-brightgreen)](https://alertsage.streamlit.app/)
-[![Tests](https://img.shields.io/badge/tests-9%20passing-green.svg)](tests/)
+<br />
 
-AlertSage takes a security analyst's most boring fifteen minutes (read the alert, decide a label, map to ATT&CK, write the rationale, paste actions into the ticket) and turns it into thirty seconds. It ships as a Streamlit-based SOC console plus a CLI; both run on the same TF-IDF + sentence-transformer + Logistic Regression pipeline, with an optional LLM second opinion routed through the provider you configure (Hugging Face, OpenAI, Anthropic, or local llama.cpp).
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
+[![Streamlit](https://img.shields.io/badge/streamlit-1.39%2B-FF4B4B.svg?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/texasbe2trill/AlertSage/tests.yml?branch=main&label=tests)](https://github.com/texasbe2trill/AlertSage/actions/workflows/tests.yml)
+[![Live Demo](https://img.shields.io/badge/live%20demo-streamlit-brightgreen.svg?logo=streamlit&logoColor=white)](https://alertsage.streamlit.app/)
 
----
+</div>
 
-## Table of contents
+<br />
 
-- [What's new in v3.1.0](#whats-new-in-v310)
-- [Showcase features](#showcase-features)
-- [Live demo](#live-demo)
-- [Quick start](#quick-start)
-- [SOC console pages](#soc-console-pages)
-- [LLM provider configuration (BYOK)](#llm-provider-configuration-byok)
-- [Demo data generator](#demo-data-generator)
-- [Architecture](#architecture)
-- [Project layout](#project-layout)
-- [Tests](#tests)
-- [Documentation](#documentation)
-- [Contributing, license, security](#contributing-license-security)
+<div align="center">
 
----
+### Try the live demo
 
-## What's new in v3.1.0
+**[alertsage.streamlit.app](https://alertsage.streamlit.app/)**
 
-A complete rewrite of the Streamlit UI, modeled on Splunk Enterprise Security and Elastic Security. Dark theme, severity as the primary color signal, JetBrains Mono for IDs and timestamps, all styling consolidated into one external stylesheet.
+A populated SOC console with synthetic events, a working classifier, and the LLM second-opinion dispatcher (Hugging Face by default; bring your own key for OpenAI or Anthropic).
 
-| Capability | Status |
-|---|---|
-| SOC-style six-page console (Overview, Investigate, Hunt, Batch, Bookmarks, Settings) | New |
-| MITRE ATT&CK kill chain visualization on Investigate | New |
-| Auto-extracting IOC panel with VirusTotal enrichment + external pivots | New |
-| Case status workflow (New / Triaging / Contained / Closed) | New |
-| Case timeline that stitches creation, status changes, notes, bookmarks | New |
-| MITRE ATT&CK heatmap on Overview | New |
-| Brushable Splunk-style timechart with range selectors | New |
-| Auto-refreshing live data panels (KPIs, charts, MITRE, recent events) | New |
-| Auto-refreshing live tail of incoming events | New |
-| Saved searches pinned to the sidebar | New |
-| MITRE coverage report + three CSV exports from Batch | New |
-| Anomaly score column on Hunt and Overview | New |
-| Demo data generator (synthetic events on a 6 second timer) | New |
-| BYOK panels for OpenAI, Anthropic, Hugging Face, VirusTotal | New |
-| Local (GGUF) provider hidden when prerequisites are missing | New |
-| Per-provider sliding-window rate limiter | New |
+<br />
 
-The classifier, MITRE mapping, and database stack are unchanged. The CLI (`nlp-triage`) is unchanged.
+<img src="docs/images/hero.png" alt="AlertSage console hero shot" width="900" />
+
+<br /><br />
+
+<img src="docs/images/demo.gif" alt="60-second walkthrough" width="900" />
+
+</div>
 
 ---
 
-## Showcase features
+## Why AlertSage
 
-### Mission control dashboard
+Security operations centers spend an outsized fraction of every shift on the same fifteen minutes: read the alert, decide a label, map it to MITRE ATT&CK, write a rationale, paste actions into the ticket. Most of that work is mechanical recall against a fixed taxonomy. The bottleneck is not the analysis, it is the typing.
 
-- Six-tile KPI strip with severity-colored borders (total analyzed, critical+high count, last 24 hours, average classifier confidence, bookmarks, analyst notes). Auto-refreshes every 6 seconds.
-- Stacked bar timechart of triage volume over 30 days, with a Splunk-style range slider and `1d / 7d / 14d / 30d / All` buttons. Auto-refreshes.
-- Classifier confidence histogram in 20 buckets, color-coded by reliability band.
-- Severity distribution donut.
-- MITRE ATT&CK tactic-by-technique heatmap with cell intensity scaling from cool to hot. Auto-refreshes.
-- Threat intelligence feed panel (TAXII-shaped mock data, swap in a real feed by replacing one constant).
-- Auto-refreshing live tail with a pulsing live dot. New events stream in within ~5 seconds of being written.
-- Recent events table with severity pill, **case status pill, anomaly score pill**, mono ID column, and truncated narrative. Auto-refreshes.
+AlertSage compresses that fifteen minutes into about thirty seconds. Free-text incidents land on a SIEM-style dashboard, get classified by a TF-IDF plus sentence-transformer hybrid, optionally routed through an LLM for a written rationale, and surfaced with MITRE ATT&CK kill chain context, IOC enrichment, and a SOC playbook hint. Bring your own key for the LLM provider you trust, or run fully local with `llama.cpp`. Keys live in session state only, never on disk.
 
-### Investigate (single-incident triage)
+The console is modeled on production tools (Splunk Enterprise Security, Elastic Security): dark mode by default, severity as the primary color signal, JetBrains Mono for IDs and timestamps. It is open source, runs locally in one command, and is deliberately built to be *demo-able*: the empty state on a fresh deploy auto-seeds synthetic history so the dashboard looks lived in from the first visit.
 
-The headline showcase surface. After running a triage you see, top to bottom:
+---
 
-1. Event head card with mono event ID (`AS-000123`), classifier and LLM timing in milliseconds, severity pill, confidence pill, anomaly score pill, uncertainty pill.
-2. **Case status stepper** with four-stage workflow: New → Triaging → Contained → Closed. Click any stage to advance; status persists across reloads via `db.save_setting`.
-3. **MITRE ATT&CK kill chain** visualization. All 13 enterprise tactics render as cells in a horizontal flow. Tactics whose techniques the classifier mapped light up with the accent color and an indigo top stripe; matched technique IDs render as monospace chips inside the cell.
-4. **Indicators and enrichment** panel. Auto-extracted IOCs (IPv4, IPv6, MD5, SHA1, SHA256, URL, email, domain, CVE, hostnames). Each IOC is an expander with verdict / score / first-seen / sources, plus per-IOC pivot links to VirusTotal, AbuseIPDB, Shodan, GreyNoise, Censys, URLhaus, MalwareBazaar, NVD, MITRE CVE.
-5. **Case timeline** as a vertical narrative: triage created, LLM rationale, status changes, analyst notes, bookmarks. Each event has a colored dot, a kind label, and a JetBrains Mono timestamp.
-6. **Class probabilities** with severity-colored progress bars (top N candidates configurable in the sidebar).
-7. **MITRE techniques** as monospace chips.
-8. **Analyst rationale** (LLM-authored or deterministic fallback) with severity-toned left border.
-9. **Playbook hint** with recommended queue, priority, and a checkbox-style action list.
-10. Footer actions: bookmark, add note, re-run.
+## What's inside
+
+The sidebar has six pages. Each maps to a different SOC workflow.
+
+### Overview
+
+<img src="docs/images/overview.png" alt="Overview dashboard" width="900" />
+
+Mission control. Six KPI tiles (total analyzed, critical and high count, last 24 hours, average classifier confidence, bookmarks, analyst notes), a 30-day stacked-bar timechart with a brushable Splunk-style range slider, a classifier-confidence histogram, a severity donut, a MITRE ATT&CK heatmap, and a live-tail panel that polls SQLite every few seconds. Every panel auto-refreshes through `st.fragment(run_every=...)` so the page feels alive without a manual reload.
+
+### Investigate
+
+<img src="docs/images/investigate.png" alt="Investigate page with kill chain" width="900" />
+
+The headline showcase surface. Pick an example narrative or paste one in, hit triage, and the result card unfolds: severity pill, mono event ID, classifier and LLM timing, four-stage case status stepper, MITRE ATT&CK kill chain visualization across all 13 enterprise tactics, an indicators panel with auto-extracted IOCs and external pivot links (VirusTotal, AbuseIPDB, Shodan, GreyNoise, MITRE CVE), the case timeline, top-N class probabilities, the LLM rationale, and a SOC playbook hint with checkbox-style actions.
 
 ### Hunt
 
-Full-text search across triage history. Filters: free-text query, classification multiselect, severity multiselect, minimum confidence slider, **minimum anomaly score slider**, time-window selector (`Last hour / 24 hours / 7 days / 30 days / All time`). Results render in the same SOC table as Overview's recent events. Save the current filter set as a named search; it appears in the sidebar with a one-click apply.
+<img src="docs/images/hunt.png" alt="Hunt page with filters and saved searches" width="900" />
+
+Full-text search across triage history. Filters: free-text query, classification multiselect, severity multiselect, minimum confidence slider, minimum anomaly score slider, time-window selector. Save the current filter set as a named search and it appears in the sidebar as a one-click apply.
 
 ### Batch
 
-CSV upload (auto-detects `incident_text` / `description` / `narrative` / `alert` / `text` columns), runs the full pipeline on up to 500 rows with a progress bar, then summarizes:
+<img src="docs/images/batch.png" alt="Batch processing with MITRE coverage" width="900" />
 
-- KPI strip (processed, critical+high, medium, benign+unknown, wall-clock elapsed).
-- Label distribution panel with severity bars.
-- **MITRE coverage report**: tactic-by-tactic event volume bars, plus a detailed expander showing every (tactic, technique, label) cell with severity breakdown.
-- **Three CSV exports**: triage results, MITRE coverage, executive tactic rollup.
+CSV upload (auto-detects `incident_text`, `description`, `narrative`, `alert`, or `text` columns) for up to 500 rows per run. After processing: a KPI strip, a label distribution panel, a tactic-level MITRE coverage report, and three CSV exports (per-row triage results, MITRE coverage by technique, executive tactic rollup).
 
 ### Bookmarks
 
-Saved investigations as expander cards. Each carries the severity pill, current case status pill, narrative quote (severity-toned), four-button case status stepper, optional analyst note, and the full case timeline.
+<img src="docs/images/bookmarks.png" alt="Bookmarks with case status workflow" width="900" />
+
+Saved investigations as expander cards. Each carries the severity pill, the current case status pill, the narrative quote (severity-toned), the four-button case status stepper (New, Triaging, Contained, Closed), the optional analyst note, and the full case timeline.
 
 ### Settings
 
-Provider radio (Local hidden when prerequisites fail). Per-provider configuration panels for OpenAI, Anthropic, Hugging Face, and VirusTotal, all with **password-masked Bring Your Own Key** fields. Demo data generator panel with toggle, "Emit one now" button, counter, last-emit timestamp, and last-error display. Triage default sliders. About panel.
+<img src="docs/images/settings.png" alt="Settings panel with BYOK fields" width="900" />
+
+Provider radio plus per-provider configuration panels for OpenAI, Anthropic, Hugging Face, and (when available locally) GGUF llama.cpp. Password-masked Bring Your Own Key fields. A demo data generator panel with a manual emit, a counter, the last error, and a "backfill 30 days of synthetic events" button. Triage default sliders. The Local provider is automatically hidden when the host has no llama-cpp-python or no `.gguf` file in `models/`.
 
 ---
 
-## Live demo
+## Bring your own key
 
-A hosted demo runs on Streamlit Community Cloud. The backing classifier and HF provider are the same; demo runs there have the demo generator on by default so the dashboard is populated.
+AlertSage routes the optional LLM second opinion through whichever provider you select. **Keys live in `st.session_state` only. They are never written to `data/triage.db`, never logged, and never echoed in error messages.**
 
-[Open the demo](https://alertsage.streamlit.app/)
+| Provider | Default model | Where to get a key | Cost posture | Latency posture |
+|---|---|---|---|---|
+| **OpenAI** | `gpt-4o-mini` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | Cheapest hosted option for this workload (about $0.15 per 1M input tokens at time of writing). | Sub-second median. |
+| **Anthropic** | `claude-haiku-4-5` | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Comparable to OpenAI for short prompts. Stronger rationale quality. | Sub-second median. |
+| **Hugging Face Inference Router** | `meta-llama/Llama-3.1-8B-Instruct:cerebras` | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) | Free tier covers low-volume demos. Cerebras provider is fast. | About 1 to 2 seconds. |
+| **Local llama.cpp (GGUF)** | local `.gguf` file | Download a Llama 3.1 8B Q6_K (or similar) to `models/` | Free. GPU recommended. | Varies with model and hardware (single-digit seconds on Apple Silicon Metal, faster on CUDA). |
+
+The dispatcher implements a graceful fallback chain: if you pick OpenAI or Anthropic but the key is missing, it routes to Hugging Face when an HF token is present, and finally to local `llama.cpp` if a GGUF is on disk. The sidebar caption shows the actually-active backend after fallbacks resolve.
+
+Per-provider sliding-window rate limits keep one provider's quota from blocking the others (default: 5 requests per 60 seconds per provider per session).
 
 ---
 
 ## Quick start
 
-### Prerequisites
-
-- Python 3.12 (pinned via `runtime.txt`)
-- `git` and a clone of the repo
-
-### Install
+Targets Python 3.12 (pinned via `runtime.txt`).
 
 ```bash
+# 1. Clone
 git clone https://github.com/texasbe2trill/AlertSage.git
 cd AlertSage
 
+# 2. Install (runtime only)
 python3.12 -m venv .venv
-source .venv/bin/activate          # macOS/Linux
-# .venv\Scripts\activate            # Windows
-
+source .venv/bin/activate
 pip install -r requirements.txt
+
+# 3. Run
+streamlit run app.py
 ```
 
-For development, tests, and notebooks:
+Open http://localhost:8501. The Hugging Face provider works out of the box if you set an `HF_TOKEN` env var or drop one into `.streamlit/secrets.toml`:
+
+```toml
+HF_TOKEN = "hf_..."
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct:cerebras"
+```
+
+For tests, notebooks, and the optional `llama-cpp-python` for local GGUF inference, install the dev extras:
 
 ```bash
 pip install -r requirements-dev.txt
 pip install -e ".[dev]"
+pytest tests/ -v
 ```
 
-### Launch the SOC console
+<details>
+<summary>Common deploy issues</summary>
 
-```bash
-streamlit run app.py
-```
+- **Cascading `ModuleNotFoundError: No module named 'torchvision'` in deploy logs.** Streamlit's file watcher introspects loaded modules, and recent transformers versions lazy-import 80+ image processors that need torchvision. Fixed in this repo by `.streamlit/config.toml` (`fileWatcherType = "none"`) and pinning `transformers<5`. If you fork and bump versions, watch for the cascade returning.
+- **"Streamlit Cloud subdomain stuck after delete."** The platform holds a deleted app's subdomain in cooldown for up to a few hours. Wait or pick a different subdomain.
+- **"connection error" / WebSocket disconnects under load.** The Overview page mounts six auto-refreshing fragments. They share a 4-second cached history snapshot to avoid hammering SQLite. If you reduce the cache TTL or add more fragments, the WS heartbeat can time out.
 
-Opens at <http://localhost:8501>. First boot is faster than the previous build because the inline CSS, the 1900-line CLI module, and the unconditional 789 MB metrics joblib are all out of the cold-start path.
-
-### Run the CLI
-
-```bash
-# Single classification
-nlp-triage --text "User clicked a phishing link in their inbox"
-
-# JSON output for scripting
-nlp-triage --text "..." --json
-
-# Bulk with LLM second opinion
-nlp-triage --bulk incidents.csv --use-llm --difficulty soc-medium
-```
-
----
-
-## SOC console pages
-
-| Page | Purpose |
-|---|---|
-| **Overview** | Mission control dashboard. Auto-refreshing KPIs, charts, MITRE heatmap, live tail, threat feed, recent events table. |
-| **Investigate** | Triage one incident end-to-end with kill chain, IOC enrichment, case timeline, classification probabilities, LLM rationale, playbook hint. |
-| **Hunt** | Search past triage results with full filter set + saved searches pinned to the sidebar. |
-| **Batch** | CSV ingest with MITRE coverage report and three CSV exports. |
-| **Bookmarks** | Saved investigations with case status workflow and timeline. |
-| **Settings** | Provider configuration, BYOK, demo generator, triage defaults. |
-
-Detailed walkthrough: [`docs/ui-guide.md`](docs/ui-guide.md).
-
----
-
-## LLM provider configuration (BYOK)
-
-AlertSage routes the LLM second opinion through whichever provider you select. **Keys live in session state only; they are never written to `data/triage.db` or any other file on disk.**
-
-### Supported providers
-
-| Provider | Default model | When to use |
-|---|---|---|
-| Hugging Face Inference | `meta-llama/Llama-3.1-8B-Instruct:cerebras` | Quick demo, free-tier or paid HF account |
-| OpenAI | `gpt-4o-mini` | Best rationale quality on commodity hardware |
-| Anthropic | `claude-haiku-4-5` | Best rationale quality plus longer context |
-| Local llama.cpp | local `.gguf` file | Air-gapped, no network egress |
-
-### Where to set credentials
-
-1. **Sidebar / Settings BYOK fields** (session only, in-memory). Paste once per session.
-2. `~/.streamlit/secrets.toml` or `<repo>/.streamlit/secrets.toml`:
-   ```toml
-   HF_TOKEN = "hf_xxx"
-   HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct:cerebras"
-   ```
-3. Environment variables: `TRIAGE_HF_TOKEN`, `TRIAGE_HF_MODEL`, `HF_TOKEN`, `HF_MODEL`, `VIRUSTOTAL_API_KEY`.
-
-### Fallback chain
-
-The dispatcher (`_build_llm_kwargs`) routes intelligently:
-
-- OpenAI selected, no key → Hugging Face (if HF token present) → Local (if GGUF available).
-- Anthropic selected, no key → same chain.
-- Local selected, GGUF runtime not available → Hugging Face.
-
-The sidebar caption shows the actually-active backend after fallbacks. Per-provider sliding-window rate limits keep one provider's quota from blocking the others.
-
-### VirusTotal IOC enrichment
-
-The IOC panel on Investigate is mocked by default. Paste a VirusTotal API key in **Settings → Threat intel enrichment** and the panel switches to live VT lookups (cached for 15 minutes per indicator). Free-tier keys work.
-
----
-
-## Demo data generator
-
-For public demos, fresh installs, or showcasing the console to a stakeholder, flip on **Settings → Demo data generator**. Every ~6 seconds AlertSage emits one synthetic incident drawn from a curated set of phishing, malware, access abuse, web attack, exfil, and benign narratives, runs it through the full pipeline, and seeds the case timeline. The Overview panels auto-refresh and pick it up.
-
-Manual controls in the same panel:
-
-- **Emit one now**: bypasses the timer for an immediate test.
-- **Clear demo events**: removes synthetic rows (`batch_id = 'demo'`) without touching real triage history.
-- Status row shows emit counter, last emit timestamp, and last error message in red when present.
+</details>
 
 ---
 
 ## Architecture
 
-```
-                ┌───────────────────────────────────────────────────┐
-                │                   app.py                          │
-                │  Streamlit router + 6 pages + design system       │
-                │  CSS lives in assets/styles.css                   │
-                └─────────────────────────────┬─────────────────────┘
-                                              │
-              ┌───────────────────────────────┼───────────────────────────────┐
-              ▼                               ▼                               ▼
-  ┌─────────────────────┐       ┌─────────────────────┐         ┌─────────────────────┐
-  │   src/triage/       │       │   data/triage.db    │         │   models/           │
-  │  classifier         │       │  SQLite             │         │  vectorizer.joblib  │
-  │  embeddings         │       │  history            │         │  enhanced_logreg    │
-  │  llm_helpers        │       │  bookmarks          │         │  baseline_logreg    │
-  │  llm_client (HF/    │       │  notes              │         │  Llama-3.1-8B GGUF  │
-  │   OpenAI/Anthropic) │       │  case status        │         │   (optional)        │
-  │  database           │       │  case timeline      │         └─────────────────────┘
-  │  preprocess         │       │  saved searches     │
-  │  cli.py             │       └─────────────────────┘
-  └─────────────────────┘
+`app.py` is a thin Streamlit router that mounts six pages and a single design system (`assets/styles.css`). Everything technical lives in `src/triage/`: a TF-IDF and sentence-transformer hybrid feature pipeline (`embeddings.py`, `model.py`, `preprocess.py`), a provider-agnostic LLM client layer (`llm_client.py` for the four backends, `llm_helpers.py` for the dispatcher and MITRE map), and a SQLite layer for history, bookmarks, notes, case status, and case timeline (`database.py`). The same helpers back the `nlp-triage` CLI in `cli.py`.
+
+```mermaid
+flowchart LR
+    UI[app.py: Streamlit router and 6 pages] --> CLF[src/triage/model.py: classifier]
+    UI --> EMB[src/triage/embeddings.py: sentence-transformer]
+    UI --> LH[src/triage/llm_helpers.py: dispatcher + MITRE map]
+    UI --> DB[(src/triage/database.py: SQLite)]
+    CLI[src/triage/cli.py: nlp-triage] --> CLF
+    CLI --> LH
+    LH --> LC[src/triage/llm_client.py]
+    LC --> P1[OpenAI]
+    LC --> P2[Anthropic]
+    LC --> P3[Hugging Face Router]
+    LC --> P4[local llama.cpp]
 ```
 
-The classifier is **TF-IDF (5000 dims) + sentence-transformer embeddings (384 dims) → Logistic Regression** over a fixed taxonomy of incident labels. Every UI prediction goes through `predict()` in `app.py` which concatenates TF-IDF and embeddings horizontally before calling `model.predict()`; this matches the training feature space of `enhanced_logreg.joblib`. The fallback `baseline_logreg.joblib` (TF-IDF only) is also supported.
-
-The LLM second opinion is provider-routed. Each provider client (`HuggingFaceInferenceClient`, `OpenAIClient`, `AnthropicClient`, `LocalLLMClient`) implements the same `generate_json(prompt) -> dict` interface so the dispatcher in `llm_second_opinion()` is provider-agnostic.
+Heavy loaders (vectorizer, classifier, embedder, database) are wrapped in `@st.cache_resource` so they load once per process. The hot path on Investigate is roughly: free text into `predict()` (TF-IDF plus sentence-transformer, concatenated, into the trained Logistic Regression), then optionally into `llm_second_opinion()` (the dispatcher), then into `_persist_analysis()` (a SQLite insert plus a timeline seed).
 
 ---
 
-## Project layout
+## Project status
 
-```
-AlertSage/
-├── app.py                       # SOC console entry point (Streamlit)
-├── assets/
-│   ├── styles.css               # Single-source design system
-│   └── icons/                   # SVG severity + brand icons
-├── src/triage/
-│   ├── cli.py                   # nlp-triage CLI entry point
-│   ├── llm_helpers.py           # LLM dispatch, MITRE map, SOC playbook hints
-│   ├── llm_client.py            # HF / OpenAI / Anthropic / local clients
-│   ├── model.py                 # vectorizer + classifier loader
-│   ├── embeddings.py            # sentence-transformer wrapper
-│   ├── database.py              # SQLite schema + accessors
-│   └── preprocess.py            # text cleaning
-├── models/                      # classifier artifacts (logreg, vectorizer)
-├── notebooks/                   # 12 educational notebooks
-├── docs/                        # mkdocs site sources
-├── tests/                       # pytest
-├── data/                        # bundled synthetic dataset (gitignored: triage.db)
-├── generator/                   # synthetic data generator
-├── requirements.txt             # runtime dependencies (lean)
-├── requirements-dev.txt         # dev, tests, docs
-├── runtime.txt                  # python-3.12
-└── pyproject.toml
-```
+This is an active personal project being revived after a 5-month pause. The recent revival landed in a few clear waves:
+
+1. A complete UI rewrite from a "premium" purple-gradient Streamlit app into a SOC console (dark, dense, severity-driven), modeled on Splunk Enterprise Security and Elastic Security.
+2. Bring Your Own Key support for OpenAI, Anthropic, and Hugging Face, with capability-gated local `llama.cpp` and a graceful fallback chain.
+3. A slim `requirements.txt` (down from a 136-line pip-freeze to 16 runtime deps), `runtime.txt` pinning Python 3.12, and a separate `requirements-dev.txt` for tests and notebooks.
+4. Resource caching, a fix for a 384-dim feature mismatch in the classifier path, an auto-refreshing Overview, an auto-seeded demo for fresh deploys, and a `.streamlit/config.toml` that stops the file-watcher cascade.
+5. A documented `nlp-triage` CLI plus a refreshed mkdocs site at `docs/`.
+
+What's next, roughly in priority order:
+
+1. Real screenshots and a 60-second walkthrough GIF (the placeholders in this README).
+2. Flesh out the threat intel feed beyond the static demo entries (TAXII collection ingest).
+3. Save analyst-tagged corrections back as labeled training data so the classifier improves over time.
+4. Add a saved-search pin to the Overview rail so common Hunts are one click from mission control.
+5. Optional STIX 2.1 / MISP export from Batch.
 
 ---
 
-## Tests
+## Contributing
 
-```bash
-pytest tests/ -v
-```
+Issues and pull requests welcome. The test suite is small (`pytest tests/ -v`); please keep it green. Style: Apache 2.0 in the headers where present, no em-dashes in user-facing strings (commit messages, docs, UI copy), and keep the runtime `requirements.txt` lean (move dev tooling to `requirements-dev.txt`).
 
-Currently 9 tests across the CLI, model artifacts, and preprocessing modules. Tests do not require the LLM provider or the GGUF model.
-
-For coverage:
-
-```bash
-pytest tests/ --cov=src/triage --cov-report=term-missing
-```
+For larger changes, open an issue first so we can sanity-check direction. The repo follows a "main is the deployable branch" convention: every commit on main should boot the app cleanly.
 
 ---
 
-## Documentation
+## License and acknowledgements
 
-The full mkdocs site lives in `docs/`. Highlights:
+Released under the [Apache License 2.0](LICENSE).
 
-| Page | Topic |
-|---|---|
-| [`docs/ui-guide.md`](docs/ui-guide.md) | SOC console walkthrough |
-| [`docs/quickstart.md`](docs/quickstart.md) | Install + first triage |
-| [`docs/cli.md`](docs/cli.md) | `nlp-triage` reference |
-| [`docs/architecture.md`](docs/architecture.md) | Module map and data flow |
-| [`docs/llm-integration.md`](docs/llm-integration.md) | Provider details |
-| [`docs/modeling-and-eval.md`](docs/modeling-and-eval.md) | Classifier training and evaluation |
-| [`docs/mitre-attribution.md`](docs/mitre-attribution.md) | MITRE ATT&CK license attribution |
-| [`docs/release-notes.md`](docs/release-notes.md) | Versioned changelog |
+Built on the shoulders of: [Streamlit](https://streamlit.io/) for the app framework, [scikit-learn](https://scikit-learn.org/) for the classifier, [sentence-transformers](https://sbert.net/) and the `all-MiniLM-L6-v2` model for embeddings, [llama.cpp](https://github.com/ggerganov/llama.cpp) and [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for local inference, the [OpenAI](https://github.com/openai/openai-python) and [Anthropic](https://github.com/anthropics/anthropic-sdk-python) Python SDKs, the [Hugging Face Inference Router](https://huggingface.co/docs/api-inference/index) for hosted models, and [Plotly](https://plotly.com/python/) for charts.
 
-Build the site locally:
+The MITRE ATT&CK technique map is used under MITRE's [terms of use](https://attack.mitre.org/resources/terms-of-use/). See [docs/mitre-attribution.md](docs/mitre-attribution.md) for full attribution.
 
-```bash
-mkdocs serve
-```
-
----
-
-## Contributing, license, security
-
-- Contributions: see [`CONTRIBUTING.md`](CONTRIBUTING.md). PRs welcome.
-- Security disclosures: see [`SECURITY.md`](SECURITY.md).
-- License: Apache 2.0, see [`LICENSE`](LICENSE).
-- MITRE ATT&CK marks and content used under MITRE's [terms of use](https://attack.mitre.org/resources/terms-of-use/); see [`docs/mitre-attribution.md`](docs/mitre-attribution.md).
-
----
-
-## A note on scope
-
-AlertSage is **research and demonstration software**. The classifier was trained on synthetic incident narratives. It maps to MITRE ATT&CK and produces SOC-style playbook hints, but it is not a substitute for production security tooling, threat intel feeds, or analyst judgment. Treat its output the way you would treat a junior analyst's first pass: a useful starting point that needs human review.
+Logo and console design by the author. Inspiration drawn from Splunk Enterprise Security and Elastic Security; AlertSage is not affiliated with either.

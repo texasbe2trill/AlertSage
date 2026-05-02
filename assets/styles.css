@@ -85,12 +85,54 @@ html, body, .stApp,
     color: var(--soc-text) !important;
 }
 
+/* Streamlit's top chrome.
+ *
+ * `stHeader` hosts the sidebar collapse/expand chevron, so we cannot
+ * zero its height (doing so traps users on mobile when they dismiss
+ * the sidebar; the chevron is the only way to bring it back).
+ * Instead: make the header transparent so it visually disappears
+ * against the page background, kill its shadow and bottom border,
+ * and explicitly hide the share/deploy toolbar and the gradient
+ * decoration strip that we actually want gone.
+ *
+ * `stSidebarCollapseButton` (Streamlit 1.30+) and `collapsedControl`
+ * (older fallback) are the chevron and the floating restore button
+ * respectively. Forced visible with high z-index so no later panel
+ * can overlay them. Tap target bumped to 44x44 on phones for a11y.
+ */
 [data-testid="stHeader"] {
     background: transparent !important;
-    height: 0 !important;
+    box-shadow: none !important;
+    border-bottom: none !important;
 }
-[data-testid="stToolbar"], [data-testid="stDecoration"] {
+[data-testid="stToolbar"],
+[data-testid="stDecoration"] {
     display: none !important;
+}
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+button[kind="header"] {
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    z-index: 1000 !important;
+}
+[data-testid="collapsedControl"] {
+    /* Floating restore button: keep it above the page chrome and
+     * tinted to match the SOC palette. */
+    background: var(--soc-surface) !important;
+    border: 1px solid var(--soc-border) !important;
+    color: var(--soc-text) !important;
+    border-radius: var(--soc-radius-sm) !important;
+    box-shadow: var(--soc-shadow-md) !important;
+}
+@media (max-width: 768px) {
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    button[kind="header"] {
+        min-width: 44px !important;
+        min-height: 44px !important;
+    }
 }
 
 .block-container {
