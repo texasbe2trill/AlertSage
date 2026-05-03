@@ -138,7 +138,7 @@ KILL_CHAIN_STAGES: list[tuple[str, str, list[str]]] = [
     ("TA0008", "Lateral Movement",    ["T1021", "T1570"]),
     ("TA0009", "Collection",          ["T1213", "T1530", "T1119"]),
     ("TA0011", "Command & Control",   ["T1071", "T1573", "T1105"]),
-    ("TA0010", "Exfiltration",        ["T1041", "T1048", "T1567", "T1020"]),
+    ("TA0010", "Exfiltration",        ["T1041", "T1048", "T1567", "T1020", "T1052"]),
     ("TA0040", "Impact",              ["T1486", "T1490", "T1499"]),
 ]
 
@@ -1295,9 +1295,16 @@ def render_ioc_panel(text: str) -> None:
                     unsafe_allow_html=True,
                 )
 
-            # Live VT attributes
+            # Live VT attributes. Streamlit forbids nested expanders, so
+            # we use a toggle inside the parent IOC expander rather than
+            # opening a second one. The toggle key is per-IOC so each
+            # row's state is independent.
             if isinstance(attributes, dict):
-                with st.expander("VirusTotal raw attributes", expanded=False):
+                show_raw = st.toggle(
+                    "Show VirusTotal raw attributes",
+                    key=f"vt_raw_{idx}_{ioc['indicator']}",
+                )
+                if show_raw:
                     st.json(attributes)
 
 
