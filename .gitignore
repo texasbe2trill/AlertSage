@@ -144,6 +144,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Streamlit local secrets. Never commit BYOK tokens or API keys.
+.streamlit/secrets.toml
+
 # Spyder project settings
 .spyderproject
 .spyproject

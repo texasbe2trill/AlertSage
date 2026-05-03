@@ -39,17 +39,24 @@ def _debug(msg: str) -> None:
 
 
 def _get_streamlit_secrets() -> tuple[str, str]:
-    """Safely read HF credentials from Streamlit secrets when available."""
-    try:
-        import streamlit as st  # type: ignore
+    """Deprecated stub.
 
-        secrets = getattr(st, "secrets", None)
-        if secrets:
-            token = str(secrets.get("HF_TOKEN", "")).strip()
-            model = str(secrets.get("HF_MODEL", "")).strip()
-            return model, token
-    except Exception:
-        pass
+    This used to call ``st.secrets.get(...)`` directly. Streamlit's
+    secrets API renders a "No secrets found. Valid paths for a
+    secrets.toml file..." warning IN THE PAGE BODY (not via an
+    exception we can swallow) whenever the secrets file is absent,
+    which made every Triage call without a checked-in secrets.toml
+    leak a noisy warning into the UI -- visible in screenshots and
+    the recorded demo.
+
+    The upstream app-level _resolve_llm_settings() already reads
+    secrets.toml via a direct file load and passes the resolved
+    token / model down through resolve_hf_credentials, so the
+    duplicated read here was both noisy and unnecessary. Returning
+    empty strings makes resolve_hf_credentials fall through to the
+    explicitly-passed token and the HF_TOKEN_ENV fallback, which is
+    where the value comes from in practice.
+    """
     return "", ""
 
 
@@ -382,9 +389,24 @@ class LocalLLMClient:
 
 
 SOC_SYSTEM_PROMPT = (
-    "You are assisting with SOC incident triage. Respond with a single "
-    "valid JSON object only, with keys 'label', 'mitre_ids', and "
-    "'rationale'. Do not include any prose outside the JSON object."
+    "You are a senior SOC analyst providing a second opinion on an "
+    "incident triage. Your job is to commit to a confident decision "
+    "even when the narrative is ambiguous. The fast classifier may "
+    "have already flagged the case as 'uncertain' because its "
+    "confidence was low; that is exactly when your judgement matters "
+    "most. Pick the SINGLE most likely category. Do not hedge. "
+    "Respond with a single valid JSON object only, with keys 'label', "
+    "'mitre_ids', and 'rationale'. Do not include any prose outside "
+    "the JSON object. "
+    "The 'label' must be EXACTLY ONE of these seven values: "
+    "phishing, malware, access_abuse, data_exfiltration, "
+    "policy_violation, web_attack, benign_activity. "
+    "Do NOT use 'uncertain'. Do NOT invent new labels. If two "
+    "categories seem equally plausible, pick the higher-impact one "
+    "(prefer 'data_exfiltration' over 'policy_violation' when "
+    "sensitive data movement is plausible). "
+    "The 'mitre_ids' must be a non-empty list of ATT&CK technique "
+    "IDs like ['T1566'] that match the chosen label."
 )
 
 

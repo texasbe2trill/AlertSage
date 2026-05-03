@@ -602,6 +602,34 @@ hr { border-color: var(--soc-border) !important; }
     color: var(--soc-text-secondary);
 }
 
+/* Hunt page interactive rows. Each row is a Streamlit st.columns layout
+ * with cells rendered as markdown plus two action buttons (View, Save).
+ * Visual rules below squeeze them down so rows feel close to the dense
+ * legacy HTML table while staying clickable. */
+.soc-hunt-th {
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--soc-text-muted);
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--soc-border);
+    margin-bottom: 0.15rem;
+}
+.soc-hunt-cell {
+    font-size: 0.84rem;
+    line-height: 1.45;
+    color: var(--soc-text);
+    padding: 0.15rem 0;
+}
+.soc-hunt-narr {
+    color: var(--soc-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
 /* ============================================================
    14. SOC DISTRIBUTION ROWS
    ============================================================ */

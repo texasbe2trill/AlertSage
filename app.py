@@ -382,11 +382,30 @@ def _env(*names: str) -> str:
 # =============================================================================
 
 def _resolve_llm_settings() -> dict[str, Any]:
-    """Snapshot the provider configuration from session/secrets/env."""
+    """Snapshot the provider configuration from session/secrets/env.
+
+    All three hosted providers fall back through the same chain:
+      1. Streamlit session state (BYOK fields in Settings)
+      2. .streamlit/secrets.toml
+      3. environment variables
+    Whichever yields a non-empty value wins. This lets a developer drop
+    a token in their shell and have the recorder / a local run light
+    up without typing anything into the BYOK panel.
+    """
     hf_secret_token = _secret("HF_TOKEN")
     hf_secret_model = _secret("HF_MODEL")
     hf_env_token = _env("TRIAGE_HF_TOKEN", "HF_TOKEN")
     hf_env_model = _env("TRIAGE_HF_MODEL", "HF_MODEL")
+
+    openai_secret_key = _secret("OPENAI_API_KEY")
+    openai_secret_model = _secret("OPENAI_MODEL")
+    openai_env_key = _env("OPENAI_API_KEY")
+    openai_env_model = _env("OPENAI_MODEL")
+
+    anthropic_secret_key = _secret("ANTHROPIC_API_KEY")
+    anthropic_secret_model = _secret("ANTHROPIC_MODEL")
+    anthropic_env_key = _env("ANTHROPIC_API_KEY")
+    anthropic_env_model = _env("ANTHROPIC_MODEL")
 
     return {
         "provider": st.session_state.get("llm_provider") or _default_provider(),
@@ -398,19 +417,39 @@ def _resolve_llm_settings() -> dict[str, Any]:
             st.session_state.get("selected_hf_token") or hf_secret_token
             or hf_env_token or ""
         ),
-        "openai_model": st.session_state.get("openai_model_id", DEFAULT_OPENAI_MODEL),
-        "openai_api_key": st.session_state.get("selected_openai_api_key", ""),
-        "anthropic_model": st.session_state.get(
-            "anthropic_model_id", DEFAULT_ANTHROPIC_MODEL
+        "openai_model": (
+            st.session_state.get("openai_model_id")
+            or openai_secret_model or openai_env_model or DEFAULT_OPENAI_MODEL
         ),
-        "anthropic_api_key": st.session_state.get(
-            "selected_anthropic_api_key", ""
+        "openai_api_key": (
+            st.session_state.get("selected_openai_api_key")
+            or openai_secret_key or openai_env_key or ""
+        ),
+        "anthropic_model": (
+            st.session_state.get("anthropic_model_id")
+            or anthropic_secret_model or anthropic_env_model
+            or DEFAULT_ANTHROPIC_MODEL
+        ),
+        "anthropic_api_key": (
+            st.session_state.get("selected_anthropic_api_key")
+            or anthropic_secret_key or anthropic_env_key or ""
         ),
     }
 
 
 def _default_provider() -> str:
-    """Pick a sensible default provider on first load."""
+    """Pick a sensible default provider on first load.
+
+    Priority order matches typical preference: Anthropic > OpenAI > HF >
+    local. The first provider with a discoverable token in secrets or
+    env wins, so a recorder run with only ANTHROPIC_API_KEY exported
+    routes there automatically without the user having to flip the
+    radio in Settings.
+    """
+    if _secret("ANTHROPIC_API_KEY") or _env("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if _secret("OPENAI_API_KEY") or _env("OPENAI_API_KEY"):
+        return "openai"
     if _secret("HF_TOKEN") or _env("TRIAGE_HF_TOKEN", "HF_TOKEN"):
         return "huggingface"
     return "local" if local_gguf_available() else "huggingface"
@@ -701,11 +740,31 @@ def render_kill_chain(active_techniques: list[str]) -> str:
     Stages whose technique set intersects `active_techniques` are
     highlighted with the accent color and a count badge. Inactive
     stages render dimmed so the analyst can see the full chain context.
+
+    The active set is expanded to include parent technique IDs of any
+    subtechniques so e.g. an LLM that returns "T1566.001" still lights
+    up the same cell as a bare "T1566". Without this normalization,
+    LLMs that prefer subtechnique granularity produced a "3 techniques
+    mapped" caption with zero visible hits.
     """
-    active_set = {t.upper() for t in active_techniques or []}
+    # Two sets: `original_set` is what the caption counts (so the user
+    # sees "3 techniques mapped" when the LLM returned 3 IDs), and
+    # `match_set` includes parent IDs of any subtechniques so cell hit
+    # detection still fires for "T1566.001".
+    original_set: set[str] = set()
+    match_set: set[str] = set()
+    for t in active_techniques or []:
+        normalized = (t or "").upper().strip()
+        if not normalized:
+            continue
+        original_set.add(normalized)
+        match_set.add(normalized)
+        if "." in normalized:
+            match_set.add(normalized.split(".", 1)[0])
+
     cells = []
     for tactic_id, tactic_name, techs in KILL_CHAIN_STAGES:
-        hits = [t for t in techs if t.upper() in active_set]
+        hits = [t for t in techs if t.upper() in match_set]
         is_hit = bool(hits)
         cell_cls = "soc-kc__cell hit" if is_hit else "soc-kc__cell"
         chips = "".join(
@@ -721,8 +780,8 @@ def render_kill_chain(active_techniques: list[str]) -> str:
     return (
         '<div class="soc-panel">'
         '<div class="soc-panel__title">Kill chain · MITRE ATT&CK '
-        f'<span class="soc-meta">{len(active_set)} technique'
-        f'{"s" if len(active_set) != 1 else ""} mapped</span></div>'
+        f'<span class="soc-meta">{len(original_set)} technique'
+        f'{"s" if len(original_set) != 1 else ""} mapped</span></div>'
         f'<div class="soc-kc">{"".join(cells)}</div>'
         '</div>'
     )
@@ -2498,6 +2557,40 @@ def _status_pill(status: str) -> str:
     return f'<span class="soc-pill {tone}">{label}</span>'
 
 
+def _hydrate_history_to_analysis(row: dict) -> dict:
+    """Map a get_analysis_history row into the dict shape that
+    render_analysis_result expects.
+
+    Demo-seeded rows have raw_result=None (we skip the classifier on
+    seed because the example label map already gives us the verdict),
+    so probabilities / mitre_techniques / llm_opinion will be empty.
+    render_analysis_result already falls back to MITRE_MAPPING for
+    techniques and tolerates an empty probabilities list, so the
+    rehydrated card just shows reduced detail rather than failing.
+    """
+    raw = row.get("raw_result")
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            raw = None
+    raw = raw or {}
+    label = row.get("final_label", "uncertain")
+    aid = int(row.get("id") or row.get("analysis_id") or 0)
+    return {
+        "analysis_id": aid,
+        "incident_text": row.get("incident_text", ""),
+        "final_label": label,
+        "max_prob": float(row.get("max_prob") or 0),
+        "uncertainty_level": row.get("uncertainty_level"),
+        "probabilities": raw.get("probabilities") or [],
+        "mitre_techniques": raw.get("mitre_techniques") or [],
+        "llm_opinion": raw.get("llm_opinion"),
+        "classifier_ms": raw.get("classifier_ms"),
+        "llm_ms": raw.get("llm_ms"),
+    }
+
+
 def _recent_events_table(rows: list[dict]) -> str:
     body_rows = []
     for r in rows:
@@ -2627,6 +2720,29 @@ def view_investigate() -> None:
                 st.warning(err)
         result["llm_opinion"] = opinion
         result["llm_ms"] = opinion_ms
+
+        # When the fast classifier hedges to "uncertain" (confidence
+        # below threshold) but the LLM second opinion commits to a
+        # concrete label, promote the LLM verdict. The LLM is the
+        # smarter, slower model; the classifier is a first-pass filter.
+        # Without this promotion the result card still reads
+        # "Uncertain" with 0 MITRE techniques even when the LLM had a
+        # confident answer, which is a poor UX (and a bad demo look).
+        if (
+            opinion
+            and result.get("final_label") == "uncertain"
+            and opinion.get("label")
+            and opinion.get("label") != "uncertain"
+        ):
+            result["final_label"] = opinion["label"]
+            mitre_ids = opinion.get("mitre_ids") or []
+            if mitre_ids:
+                result["mitre_techniques"] = mitre_ids
+            else:
+                result["mitre_techniques"] = MITRE_MAPPING.get(
+                    opinion["label"], []
+                )
+
         result["analysis_id"] = _persist_analysis(result, batch_id=None)
         st.session_state["current_analysis"] = result
 
@@ -2880,7 +2996,18 @@ def _bookmark_current(result: dict) -> None:
         st.warning("No analysis id; cannot bookmark.")
         return
     try:
-        _db().add_bookmark(int(aid), note="")
+        # add_bookmark's first positional argument is incident_text, NOT
+        # analysis_id. Calling add_bookmark(aid, note="") historically
+        # stuffed the integer id into the incident_text column and left
+        # analysis_id / final_label NULL, so the Bookmarks page rendered
+        # only the number. Passing all four named args wires it up
+        # correctly.
+        _db().add_bookmark(
+            incident_text=result.get("incident_text", ""),
+            final_label=result.get("final_label"),
+            note="",
+            analysis_id=int(aid),
+        )
         append_timeline_event(int(aid), "bookmark", "Saved as a bookmark.")
         st.success("Bookmarked.")
     except Exception as exc:
@@ -3036,9 +3163,80 @@ def view_hunt() -> None:
         return
 
     rows = sorted(rows, key=lambda x: x.get("timestamp", ""), reverse=True)
-    st.markdown(_recent_events_table(rows[:200]), unsafe_allow_html=True)
-    if len(rows) > 200:
-        st.caption(f"Showing first 200 of {len(rows):,} matches.")
+
+    # Per-row interactive layout. Each row carries the same pills as the
+    # legacy HTML table plus two action buttons: View opens the row in
+    # Investigate (hydrated from the history record), Bookmark calls
+    # add_bookmark directly. Capped at the first 100 rows because every
+    # row creates two button widgets and Streamlit's per-rerun overhead
+    # adds up; users with broader queries should narrow with the
+    # filters above.
+    LIMIT = 100
+    visible = rows[:LIMIT]
+
+    # Header strip
+    h = st.columns([1.3, 0.8, 1.4, 1.1, 0.8, 1.0, 3.6, 0.9, 1.1], gap="small")
+    headers = ["Time", "ID", "Class", "Status", "Conf", "Anomaly", "Narrative", "", ""]
+    for col, label_txt in zip(h, headers):
+        col.markdown(
+            f'<div class="soc-hunt-th">{label_txt}</div>',
+            unsafe_allow_html=True,
+        )
+
+    for r in visible:
+        aid_raw = r.get("id") or r.get("analysis_id")
+        if aid_raw is None:
+            continue
+        try:
+            aid = int(aid_raw)
+        except (TypeError, ValueError):
+            continue
+        dt = _safe_dt(r.get("timestamp"))
+        when = dt.strftime("%b %d %H:%M") if dt else "-"
+        label = r.get("final_label", "uncertain")
+        try:
+            conf = float(r.get("max_prob") or 0)
+        except Exception:
+            conf = 0.0
+        anomaly = _anomaly_score(label, conf)
+        body = (r.get("incident_text") or "").strip()
+        body_short = body[:130] + ("..." if len(body) > 130 else "")
+        status = get_case_status(aid)
+
+        c = st.columns([1.3, 0.8, 1.4, 1.1, 0.8, 1.0, 3.6, 0.9, 1.1], gap="small")
+        c[0].markdown(f'<div class="soc-hunt-cell soc-mono">{when}</div>', unsafe_allow_html=True)
+        c[1].markdown(f'<div class="soc-hunt-cell soc-mono">#{aid}</div>', unsafe_allow_html=True)
+        c[2].markdown(f'<div class="soc-hunt-cell">{severity_pill(label)}</div>', unsafe_allow_html=True)
+        c[3].markdown(f'<div class="soc-hunt-cell">{_status_pill(status)}</div>', unsafe_allow_html=True)
+        c[4].markdown(f'<div class="soc-hunt-cell soc-mono">{conf:.0%}</div>', unsafe_allow_html=True)
+        c[5].markdown(f'<div class="soc-hunt-cell">{_anomaly_pill(anomaly)}</div>', unsafe_allow_html=True)
+        c[6].markdown(f'<div class="soc-hunt-cell soc-hunt-narr">{body_short}</div>', unsafe_allow_html=True)
+        if c[7].button("View", key=f"hunt_view_{aid}", help="Open in Investigate", use_container_width=True):
+            st.session_state["current_analysis"] = _hydrate_history_to_analysis(r)
+            st.session_state["view"] = "investigate"
+            st.rerun()
+        if c[8].button("Bookmark", key=f"hunt_bm_{aid}", help="Bookmark this incident", use_container_width=True):
+            try:
+                # add_bookmark's first positional arg is incident_text,
+                # not analysis_id. Pass everything by keyword so the row
+                # carries narrative + label + the link back to the
+                # original analysis when we render Bookmarks later.
+                _db().add_bookmark(
+                    incident_text=r.get("incident_text", ""),
+                    final_label=label,
+                    note="",
+                    analysis_id=aid,
+                )
+                append_timeline_event(aid, "bookmark", "Bookmarked from Hunt.")
+                st.toast(f"#{aid} bookmarked")
+            except Exception as exc:
+                st.error(f"Could not bookmark: {exc}")
+
+    if len(rows) > LIMIT:
+        st.caption(
+            f"Showing first {LIMIT} interactive of {len(rows):,} matches. "
+            "Tighten the filters above to drill into more."
+        )
 
 
 # =============================================================================
@@ -3299,17 +3497,40 @@ def view_bookmarks() -> None:
 
     render_section_head("Saved", action=f"{len(bookmarks):,} entries")
     for bm in bookmarks:
-        label = bm.get("final_label", "uncertain")
+        # The bookmarks table stores incident_text, final_label, and
+        # created_at. max_prob / uncertainty / mitre live on the linked
+        # analysis_history row, so fetch that when analysis_id is set.
+        bm_id = bm.get("id")
+        analysis_id_raw = bm.get("analysis_id")
+        analysis_id = int(analysis_id_raw) if analysis_id_raw else None
+
+        linked = None
+        if analysis_id is not None:
+            try:
+                linked = db.get_analysis_by_id(analysis_id)
+            except Exception:
+                linked = None
+
+        label = (
+            bm.get("final_label")
+            or (linked or {}).get("final_label")
+            or "uncertain"
+        )
+        body = (
+            bm.get("incident_text")
+            or (linked or {}).get("incident_text")
+            or ""
+        ).strip()
         try:
-            conf = float(bm.get("max_prob") or 0)
+            conf = float((linked or {}).get("max_prob") or 0)
         except Exception:
             conf = 0.0
-        body = (bm.get("incident_text") or "").strip()
-        ts = _safe_dt(bm.get("timestamp"))
+        # Prefer the original analysis timestamp; fall back to when the
+        # bookmark itself was created.
+        ts_str = (linked or {}).get("timestamp") or bm.get("created_at")
+        ts = _safe_dt(ts_str)
         when = ts.strftime("%b %d, %Y at %H:%M") if ts else "Unknown time"
         note = (bm.get("note") or "").strip()
-        bm_id = bm.get("id")
-        analysis_id = bm.get("analysis_id") or bm.get("id")
         status = get_case_status(analysis_id) if analysis_id else "new"
         anomaly = _anomaly_score(label, conf)
 
