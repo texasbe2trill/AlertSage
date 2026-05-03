@@ -53,9 +53,156 @@ MITRE_MAPPING = {
     "access_abuse": ["T1078", "T1110"],
     "data_exfiltration": ["T1041", "T1567"],
     "policy_violation": ["T1052"],
+    # Insider threat covers the canonical sklearn class for legitimate-
+    # account misuse: Valid Accounts (T1078) for the access pattern,
+    # Exfiltration Over Web Service (T1567) for personal-cloud uploads,
+    # Exfiltration Over Physical Medium (T1052) for USB-style egress.
+    # Without this entry the coverage CSV bucketed every insider_threat
+    # event into UNMAPPED, breaking the user's reconciliation.
+    "insider_threat": ["T1078", "T1567", "T1052"],
     "benign_activity": [],
     "uncertain": [],
 }
+
+
+# 3-way LLM assist modes used by the UI radio. Kept here so app.py and
+# any future consumer share one source of truth.
+LLM_ASSIST_OFF = "off"
+LLM_ASSIST_FALLBACK = "fallback"
+LLM_ASSIST_OVERRIDE = "override"
+LLM_ASSIST_MODES = (LLM_ASSIST_OFF, LLM_ASSIST_FALLBACK, LLM_ASSIST_OVERRIDE)
+
+
+# Per-provider effective rate limits. The bundled HuggingFace fallback
+# stays modest because the token is shared across every visitor; BYOK
+# calls (user pasted their own key) get a much higher cap because the
+# upstream quota is theirs to manage. Local llama.cpp is bounded by
+# CPU/GPU rather than API quota, so the cap is set effectively-
+# unlimited rather than zero (an explicit very-large cap is clearer
+# than a None sentinel and lets the existing sliding-window code stay
+# unchanged).
+RATE_LIMIT_BYOK_CAP = 60
+RATE_LIMIT_BYOK_WINDOW_S = 60
+RATE_LIMIT_DEMO_CAP = 5
+RATE_LIMIT_DEMO_WINDOW_S = 60
+RATE_LIMIT_LOCAL_CAP = 10_000
+RATE_LIMIT_LOCAL_WINDOW_S = 60
+
+
+def effective_rate_window(
+    provider: str, *, byok_present: bool
+) -> tuple[int, int]:
+    """Return (cap, window_seconds) for one provider in the current
+    session.
+
+    Pure function; no streamlit dependency. The caller is responsible
+    for telling us whether a user-supplied API key is present in
+    session state (byok_present=True). Splitting the decision this
+    way lets the tests cover every (provider, byok) combination
+    without standing up the Streamlit runtime.
+    """
+    if provider == "local":
+        return RATE_LIMIT_LOCAL_CAP, RATE_LIMIT_LOCAL_WINDOW_S
+    if byok_present and provider in ("openai", "anthropic", "huggingface"):
+        return RATE_LIMIT_BYOK_CAP, RATE_LIMIT_BYOK_WINDOW_S
+    # Either an unrecognized provider or huggingface on the bundled
+    # token. Either way the conservative shared-quota cap applies.
+    return RATE_LIMIT_DEMO_CAP, RATE_LIMIT_DEMO_WINDOW_S
+
+
+def with_forced_fallback(
+    classify,
+    text: str,
+    *,
+    skip_preprocessing: bool = False,
+) -> tuple[dict | None, str | None, dict]:
+    """Retry orchestrator: if `classify` returns an opinion with label
+    'uncertain', call it again with force_classification=True so the
+    second pass commits to an actionable label.
+
+    `classify` is any callable matching the run_llm_second_opinion
+    signature: (text, *, skip_preprocessing, force_classification)
+    -> (opinion | None, err | None). Keeping this as a callable lets
+    the orchestrator be unit-tested with a stub instead of having to
+    import the full app.py + streamlit stack.
+
+    Returns (opinion, err, details). The details dict surfaces what
+    happened so the caller can drive cost-transparency counters and
+    diagnostic logging:
+      - first_pass_label: the label from the first call (or None on
+        error)
+      - first_pass_err: the err string from the first call
+      - force_pass_attempted: True when the first pass was 'uncertain'
+        and the orchestrator tried a second call
+      - force_pass_label: the label from the second call (or None)
+      - force_pass_err: the err string from the second call
+
+    Cost note: in the worst case this burns 2 LLM calls per event. In
+    practice the second pass only fires for the subset where the
+    first-pass returned 'uncertain', which is small once the analyst-
+    voice prompt is in place. Both calls share the per-provider rate
+    limiter, so a hedge-heavy run can hit the rate limit faster than
+    a single-call run.
+    """
+    details: dict = {
+        "first_pass_label": None,
+        "first_pass_err": None,
+        "force_pass_attempted": False,
+        "force_pass_label": None,
+        "force_pass_err": None,
+    }
+    opinion, err = classify(text, skip_preprocessing=skip_preprocessing)
+    details["first_pass_label"] = opinion.get("label") if opinion else None
+    details["first_pass_err"] = err
+    if err or not opinion:
+        return opinion, err, details
+    if opinion.get("label") != "uncertain":
+        return opinion, None, details
+    details["force_pass_attempted"] = True
+    forced, forced_err = classify(
+        text,
+        skip_preprocessing=skip_preprocessing,
+        force_classification=True,
+    )
+    details["force_pass_label"] = forced.get("label") if forced else None
+    details["force_pass_err"] = forced_err
+    if forced_err or not forced:
+        # Force-pass failed (rate limit, network, parse error). Return
+        # the original opinion so the caller still has the first-pass
+        # rationale to show; apply_llm_override will correctly skip
+        # the override on 'uncertain'.
+        return opinion, forced_err, details
+    return forced, None, details
+
+
+def apply_llm_override(result: dict, opinion: dict | None) -> bool:
+    """Override the classifier label in `result` with the LLM opinion.
+
+    Mutates `result` in place. The override only fires when the opinion
+    is well-formed and the LLM committed to a concrete canonical label
+    (one in MITRE_MAPPING, excluding 'uncertain'). Out-of-vocab or
+    'uncertain' labels leave the sklearn label intact, so a flaky or
+    hedge-prone LLM can never make the result worse than the classifier
+    alone. Returns True when the override was applied; the UI uses
+    that boolean to drive the cost-transparency counter.
+
+    Severity is intentionally not part of the LLM contract here. The
+    canonical severity_for(label) mapping in app.py is used uniformly,
+    so overriding the label is enough to lift severity to the LLM-
+    inferred level. This keeps the JSON schema returned by
+    llm_second_opinion stable across this change.
+    """
+    if not opinion:
+        return False
+    label = opinion.get("label")
+    if not label or label == "uncertain":
+        return False
+    if label not in MITRE_MAPPING:
+        return False
+    result["final_label"] = label
+    mitre_ids = opinion.get("mitre_ids") or MITRE_MAPPING.get(label, [])
+    result["mitre_techniques"] = mitre_ids
+    return True
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -139,37 +286,6 @@ def _get_hf_client(model: str, token: str, max_tokens: int) -> HuggingFaceInfere
         max_new_tokens=max_tokens,
         rate_limiter=_hf_rate_limiter,
     )
-
-
-# -----------------------------------------------------------------------------
-# Hallucination guard helpers
-# -----------------------------------------------------------------------------
-
-def _extract_indicators(text: str) -> set[str]:
-    """Extract simple IOC-style indicators from text.
-
-    Used to sanity-check LLM rationales for hallucinated entities that do
-    not appear in the original incident narrative.
-    """
-    if not text:
-        return set()
-
-    indicators: set[str] = set()
-    url_pattern = r"https?://[^\s]+"
-    domain_pattern = (
-        r"\b[a-zA-Z0-9.-]+\.(com|net|org|io|gov|edu|co|biz|info|cloud|xyz)\b"
-    )
-    email_pattern = r"\b\S+@\S+\b"
-    ipv4_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-
-    for pattern in (url_pattern, domain_pattern, email_pattern, ipv4_pattern):
-        for match in re.findall(pattern, text):
-            if isinstance(match, tuple):
-                indicators.add(str(match[0]).lower())
-            else:
-                indicators.add(str(match).lower())
-
-    return indicators
 
 
 def _lenient_extract_llm_fields(raw_text: str) -> dict:
@@ -453,6 +569,7 @@ def llm_second_opinion(
     anthropic_model: str | None = None,
     anthropic_api_key: str | None = None,
     max_tokens: int | None = None,
+    force_classification: bool = False,
 ) -> dict:
     """Use a local LLM, Hugging Face, OpenAI, or Anthropic as a second
     opinion on the incident narrative.
@@ -537,7 +654,30 @@ def llm_second_opinion(
         "lure. "
         "- 'web_attack' = SQLi, XSS, SSRF, webshell, WAF events, etc. "
         "- 'benign_activity' = confirmed non-malicious. "
-        "Do NOT use 'uncertain'. Do NOT invent new labels. If two "
+        + (
+            # Force-classification pass: a prior call already returned
+            # 'uncertain' and we're retrying. Strip the escape hatch
+            # entirely so the model commits to one of the seven
+            # actionable labels.
+            "You MUST commit to one of the seven labels above. "
+            "'uncertain' is NOT permitted under any circumstances on "
+            "this pass; if the narrative is genuinely uninterpretable, "
+            "pick 'benign_activity' and explain in the rationale that "
+            "the text is too sparse to classify confidently. "
+            if force_classification else
+            # Normal first pass: analyst-voice framing. Lean toward
+            # actionable labels even on partial signals; reserve
+            # 'uncertain' for genuinely uninterpretable input rather
+            # than ambiguous-but-readable narratives.
+            "Lean toward the most plausible attacker-aligned label "
+            "even on partial signals. An over-classification is "
+            "recoverable in review; a missed one is not. Only return "
+            "'uncertain' if the text is genuinely uninterpretable: "
+            "under five words, gibberish, or describing no security-"
+            "relevant activity at all. Ambiguous-but-readable "
+            "narratives MUST get an actionable label. "
+        ) +
+        "Do NOT invent new labels. If two "
         "categories seem equally plausible, pick the one with the "
         "higher potential impact (prefer 'data_exfiltration' over "
         "'policy_violation' when sensitive data movement is "
@@ -753,127 +893,92 @@ def llm_second_opinion(
 
         except Exception as exc:
             _llm_debug(f"LLM assist failed or returned invalid JSON: {exc!r}")
-            safe_label = "uncertain"
-            safe_rationale = build_llm_rationale(safe_label, llm_text)
-            return {
-                "label": safe_label,
-                "mitre_ids": [],
-                "rationale": safe_rationale,
-            }
+            # Bubble up as a real provider failure instead of a
+            # synthetic uncertain dict. See LLMProviderError above
+            # for why; the short version is that returning a fake
+            # opinion here let upstream parse failures masquerade as
+            # 'successful uncertain' answers, bypassing both the
+            # force-pass rewrite and the diagnostic counters.
+            raise LLMProviderError(
+                f"LLM output was not valid JSON: {exc}"
+            )
 
     if data is None:
         _llm_debug("LLM output was empty after all backends; returning uncertain.")
-        safe_label = "uncertain"
-        safe_rationale = build_llm_rationale(safe_label, llm_text)
-        return {
-            "label": safe_label,
-            "mitre_ids": [],
-            "rationale": safe_rationale,
-        }
+        raise LLMProviderError(
+            "LLM output was empty after all backends"
+        )
 
     label = data.get("label", "uncertain")
     _llm_debug(f"Parsed LLM JSON: {data!r}")
     _llm_debug(f"LLM-suggested label before normalization: {label!r}")
 
+    # Expanded synonym map. Strong models reach for the broader MITRE
+    # tactic / kill-chain vocabulary even when the prompt enumerates a
+    # smaller set; without these mappings those near-misses got
+    # rebounded to 'uncertain' by the schema gate, which is exactly
+    # what the user complained about. Each mapping picks the most
+    # natural actionable bucket for the source term.
     synonym_map = {
         "ransomware": "malware",
         "brute_force_attack": "access_abuse",
+        "credential_access": "access_abuse",
+        "credential_stuffing": "access_abuse",
+        "credential_theft": "access_abuse",
+        "lateral_movement": "access_abuse",
+        "privilege_escalation": "access_abuse",
+        "command_and_control": "malware",
+        "c2": "malware",
+        "defense_evasion": "malware",
+        "persistence": "malware",
+        "execution": "malware",
+        "initial_access_malware": "malware",
+        "ddos": "web_attack",
+        "denial_of_service": "web_attack",
+        "vulnerability_exploitation": "web_attack",
+        "exploit": "web_attack",
+        "social_engineering": "phishing",
+        "spear_phishing": "phishing",
+        "exfiltration": "data_exfiltration",
+        "data_theft": "data_exfiltration",
     }
     if label in synonym_map:
         canonical = synonym_map[label]
         _llm_debug(f"Normalizing LLM label {label!r} to canonical {canonical!r}.")
         label = canonical
     if label not in MITRE_MAPPING.keys() and label != "uncertain":
-        label = "uncertain"
+        # In force_classification mode the rebound default is the
+        # safest actionable label rather than 'uncertain', so a weak
+        # second-pass response can't loop the user back to the same
+        # state they were trying to escape.
+        label = "benign_activity" if force_classification else "uncertain"
+
+    # Force mode also refuses to persist 'uncertain' even when the
+    # LLM explicitly returned it. The retry only fires after a
+    # first-pass uncertain, so accepting another uncertain here would
+    # defeat the entire fallback. benign_activity is the honest
+    # signal: 'I looked and didn't find an attacker pattern.'
+    if force_classification and label == "uncertain":
+        _llm_debug(
+            "Force-classification pass returned 'uncertain'; "
+            "rewriting to 'benign_activity' as the safest actionable default."
+        )
+        label = "benign_activity"
 
     raw_mitre_ids = data.get("mitre_ids", [])
     if not isinstance(raw_mitre_ids, list):
         raw_mitre_ids = []
 
-    lower_text = text.lower()
-
-    exfil_keywords = _EXFIL_KEYWORDS
-    malware_keywords = _MALWARE_KEYWORDS
-    web_keywords = _WEB_KEYWORDS
-    access_keywords = _ACCESS_KEYWORDS
-    policy_keywords = _POLICY_KEYWORDS
-
-    def _has_any(text_lc: str, keywords: list[str]) -> bool:
-        return any(k in text_lc for k in keywords)
-
-    # The keyword guards below were originally defensive scaffolding for
-    # the local llama.cpp / HF demo backends, where small-model output
-    # routinely hallucinates IOCs or jumps to the wrong label on a
-    # word-level cue. Hosted BYOK providers (OpenAI, Anthropic) are
-    # strong enough that those guards do more harm than good -- they
-    # downgrade legitimately confident answers to "uncertain" whenever
-    # the narrative happens to use vocabulary not covered by our fixed
-    # keyword lists. Skip them for BYOK paths and trust the LLM.
-    trusted_provider = provider_choice in {"openai", "anthropic"}
-
-    if not trusted_provider:
-        raw_rationale = str(data.get("rationale", "") or "")
-        incident_iocs = _extract_indicators(text)
-        rationale_iocs = _extract_indicators(raw_rationale)
-        extra_iocs = rationale_iocs - incident_iocs
-        if extra_iocs:
-            _llm_debug(
-                f"LLM rationale introduced new IOC-like indicators: {sorted(extra_iocs)!r}; "
-                "treating as hallucinated and downgrading to 'uncertain'."
-            )
-            safe_label = "uncertain"
-            safe_rationale = build_llm_rationale(safe_label, llm_text)
-            return {
-                "label": safe_label,
-                "mitre_ids": [],
-                "rationale": safe_rationale,
-            }
-
-        if label == "data_exfiltration" and not _has_any(lower_text, exfil_keywords):
-            _llm_debug("Downgrading 'data_exfiltration' (no exfil keywords).")
-            label = "uncertain"
-        elif label == "malware" and not _has_any(lower_text, malware_keywords):
-            _llm_debug("Downgrading 'malware' (no malware keywords).")
-            label = "uncertain"
-        elif label == "web_attack" and not _has_any(lower_text, web_keywords):
-            _llm_debug("Downgrading 'web_attack' (no web indicators).")
-            label = "uncertain"
-        elif label == "access_abuse" and not _has_any(lower_text, access_keywords):
-            _llm_debug("Downgrading 'access_abuse' (no identity terms).")
-            label = "uncertain"
-        elif label == "policy_violation" and not _has_any(lower_text, policy_keywords):
-            _llm_debug("Downgrading 'policy_violation' (no policy/HR language).")
-            label = "uncertain"
-
-        if label == "phishing" and not re.search(
-            r"\b(email|mailbox|inbox|message|phishing|link|url|clicked)\b",
-            lower_text,
-        ):
-            _llm_debug("Downgrading 'phishing' (no email indicators).")
-            label = "uncertain"
-
-    if not trusted_provider and label == "uncertain":
-        heuristic_label: str | None = None
-        if _has_any(lower_text, exfil_keywords):
-            heuristic_label = "data_exfiltration"
-        elif _has_any(lower_text, malware_keywords):
-            heuristic_label = "malware"
-        elif _has_any(lower_text, web_keywords):
-            heuristic_label = "web_attack"
-        elif _has_any(lower_text, access_keywords):
-            heuristic_label = "access_abuse"
-        elif _has_any(lower_text, policy_keywords):
-            heuristic_label = "policy_violation"
-        elif re.search(
-            r"\b(email|mailbox|inbox|message|phishing|link|url|clicked)\b", lower_text
-        ):
-            heuristic_label = "phishing"
-
-        if heuristic_label:
-            _llm_debug(
-                f"Promoting 'uncertain' to heuristic label {heuristic_label!r}."
-            )
-            label = heuristic_label
+    # No per-provider asymmetry: all four providers (OpenAI, Anthropic,
+    # HuggingFace, local llama.cpp) get identical treatment downstream.
+    # The previous build kept extra defensive guards for HF/local that
+    # downgraded confident in-vocab answers based on keyword absence in
+    # the source text. Those guards were written for a much weaker
+    # generation of small models and routinely punished correct LLM
+    # output on narratives that simply used vocabulary not in our
+    # fixed keyword lists. Schema validation (label in MITRE_MAPPING
+    # plus uncertain) plus synonym normalization above is enough for
+    # every provider; anything beyond that second-guesses the model.
 
     canonical_mitre = MITRE_MAPPING.get(label, [])
     if raw_mitre_ids:
@@ -913,107 +1018,34 @@ def _get_provider_rate_limiter(provider: str) -> RateLimiter:
     return _provider_rate_limiters[provider]
 
 
+class LLMProviderError(Exception):
+    """Raised when the LLM call cannot be satisfied (auth missing,
+    network or provider error, all backends returning empty, JSON
+    parse failure that survived the lenient extractor).
+
+    The previous build returned a synthetic
+    {'label': 'uncertain', ...} dict in these situations, which
+    masked provider failures as 'successful uncertain' responses
+    and bypassed both the force_classification rewrite and the
+    orchestrator's err path. Raising here lets the outer caller in
+    app.py turn this into the (None, err) shape that the
+    diagnostics counters and the surface warning expect.
+    """
+
+
 def _placeholder_result(rationale: str) -> dict:
-    return {
-        "label": "uncertain",
-        "mitre_ids": [],
-        "rationale": rationale,
-    }
-
-
-# -----------------------------------------------------------------------------
-# Keyword tables (kept private; only used by llm_second_opinion)
-# -----------------------------------------------------------------------------
-
-_EXFIL_KEYWORDS = [
-    "exfil", "exfiltration", "data exfil", "data leak", "data theft",
-    "download", "downloaded", "upload", "uploaded", "transfer",
-    "transferred", "copied", "moved", "synced", "synchronized",
-    "archive", "archived", "compressed", "zip", "tar.gz", "7z",
-    "export", "exported", "dump", "database dump", "db dump",
-    "dropbox", "google drive", "gdrive", "onedrive", "box.com",
-    "box drive", "sharefile", "sharepoint", "share point",
-    "wetransfer", "mega.nz", "mega.io", "cloud storage",
-    "object storage", "s3", "s3 bucket", "ftp", "sftp", "scp",
-    "rsync", "rclone", "usb", "thumb drive", "flash drive",
-    "removable media", "external drive", "external disk",
-    "burned to dvd", "sent to personal email", "personal email account",
-    "gmail.com", "yahoo.com", "outlook.com", "protonmail",
-    "forwarded externally", "emailed externally", "sent outside organization",
-]
-
-_MALWARE_KEYWORDS = [
-    "malware", "ransomware", "trojan", "virus", "worm", "backdoor",
-    "remote access trojan", "rat", "infostealer", "info stealer",
-    "keylogger", "key logger", "spyware", "adware", "crypto-miner",
-    "cryptominer", "coinminer", "malicious payload", "payload dropped",
-    "dropped file", "suspicious process", "unknown binary",
-    "unsigned binary", "persistence", "autorun", "runkey",
-    "scheduled task", "schtasks.exe", "registry run key",
-    "dll sideloading", "sideloading", "code injection", "shellcode",
-    "beacon", "c2", "command and control", "callback domain",
-    "powershell", "powershell.exe", "wscript.exe", "cscript.exe",
-    "mshta.exe", "rundll32.exe", "regsvr32.exe", "living off the land",
-    "lolbin", "ransom", "ransom note", "decrypt", "decryptor",
-    "encrypting", "encrypted", "encryption", "files renamed",
-    "file extension changed", "remote access tool",
-    "remote administration tool", "unapproved remote access",
-    "unauthorized remote access", "screen sharing tool",
-    "remote desktop tool", "edr alert", "edr detection", "av alert",
-    "antivirus alert", "detected malware", "blocked malware",
-    "malicious hash", "malicious executable",
-]
-
-_WEB_KEYWORDS = [
-    "web application", "web app", "web server", "website", "portal",
-    "api endpoint", "rest api", "graphql", "http", "https", "url path",
-    "endpoint", "uri", "apache", "nginx", "iis", "tomcat",
-    "reverse proxy", "load balancer", "waf", "web application firewall",
-    "webshell", "web shell", "file upload handler", "upload handler",
-    "sql injection", "sql-injection", "sqli", "xss",
-    "cross-site scripting", "csrf", "cross-site request forgery",
-    "ssrf", "server-side request forgery", "lfi", "rfi",
-    "path traversal", "http flood", "layer 7 ddos", "ddos",
-    "denial of service", "distributed denial-of-service",
-    "spike in http requests", "excessive http requests",
-    "botnet traffic", "suspicious user agents", "/login", "/signin",
-    "/auth", "login page", "authentication endpoint",
-]
-
-_ACCESS_KEYWORDS = [
-    "unauthorized", "unauthorised", "suspicious login", "suspicious logon",
-    "login", "logon", "sign-in", "signin", "authentication",
-    "auth failure", "failed login", "failed logon", "failed authentication",
-    "account", "user account", "service account", "privileged account",
-    "admin account", "credential", "credentials", "password", "passphrase",
-    "password reset", "password change", "password spray", "brute force",
-    "dictionary attack", "credential stuffing", "compromised credentials",
-    "mfa", "multi-factor", "otp", "one-time passcode", "sso",
-    "single sign-on", "okta", "entra id", "azure ad", "pingfederate",
-    "ping federate", "duo", "vpn", "remote access vpn", "citrix",
-    "rdp", "remote desktop", "beyondtrust", "privilege", "role",
-    "entitlement", "elevated rights", "access", "session",
-    "session hijack", "account lockout", "locked out",
-    "disabled account", "new account created", "suspicious account creation",
-]
-
-_POLICY_KEYWORDS = [
-    "policy", "corporate policy", "company policy", "policy violation",
-    "policy breach", "violated policy", "acceptable use",
-    "acceptable use policy", "aup", "code of conduct", "code-of-conduct",
-    "data handling standard", "information security policy", "hr",
-    "human resources", "compliance", "governance", "grc", "legal",
-    "insider risk", "misuse of resources", "misuse of company resources",
-    "inappropriate content", "inappropriate use", "shadow it",
-    "unsanctioned application", "unsanctioned cloud service",
-    "dlp alert", "data loss prevention", "classified data",
-    "sensitive data", "confidential data", "handling of pii",
-    "handling of phi", "hr case opened", "hr investigation",
-    "written warning", "disciplinary action",
-]
+    """Backwards-compatible name kept for the four call sites that
+    used to invoke this. The function now raises rather than
+    returning a synthetic uncertain dict; see LLMProviderError above
+    for the rationale. The signature still claims to return a dict
+    so type-checkers don't complain at the call sites that do
+    `return _placeholder_result(...)`; the raise short-circuits the
+    return."""
+    raise LLMProviderError(rationale)
 
 
 __all__ = [
+    "LLMProviderError",
     "MITRE_MAPPING",
     "soc_triage_hint",
     "build_llm_rationale",

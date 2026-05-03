@@ -1,6 +1,22 @@
 import os
+import sys
 import urllib.request
 import pytest
+
+# Ensure tests resolve `triage` from THIS checkout's src/, not from a
+# stale editable install pointing at a sibling worktree. Without this
+# guard the conftest in a git-worktree checkout will silently use the
+# main repo's src/ tree (whatever was `pip install -e`'d into the
+# venv), which means new modules added on this branch are invisible
+# to pytest. Prepending the worktree's src/ to sys.path -- and
+# evicting any previously-imported `triage` modules -- forces a clean
+# resolution from the local files.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOCAL_SRC = os.path.join(_REPO_ROOT, "src")
+if os.path.isdir(os.path.join(_LOCAL_SRC, "triage")) and _LOCAL_SRC not in sys.path:
+    sys.path.insert(0, _LOCAL_SRC)
+    for _mod in [m for m in list(sys.modules) if m == "triage" or m.startswith("triage.")]:
+        del sys.modules[_mod]
 
 DATA_PATH = "data/cyber_incidents_simulated.csv"
 # Alternative URLs in order of preference

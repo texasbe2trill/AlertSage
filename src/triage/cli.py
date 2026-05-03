@@ -700,6 +700,18 @@ def parse_args():
             "to provide a second opinion when the baseline model is uncertain."
         ),
     )
+    parser.add_argument(
+        "-q",
+        "--query",
+        type=str,
+        default=None,
+        help=(
+            "Lucene-style hunt DSL filter applied to bulk-mode results "
+            "before display/output. Example: "
+            "'label:malware AND confidence:>=0.8'. "
+            "See `src/triage/hunt_query.py` for the full grammar."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -778,6 +790,42 @@ def main():
                     _llm_debug(f"LLM second opinion failed in bulk mode: {exc!r}")
 
             results.append(result)
+
+        if args.query:
+            # Adapt the CLI result dict to the hunt-DSL field
+            # extractors: history rows expose `incident_text` and the
+            # Streamlit decorator attaches `_severity`/`_dt`. Aliasing
+            # at the boundary keeps the DSL itself unchanged.
+            from .hunt_query import (
+                ParseError as _DSLParseError,
+                compile_query as _compile_dsl,
+            )
+
+            for r in results:
+                r.setdefault("incident_text", r.get("raw_text", ""))
+                r.setdefault(
+                    "raw_result",
+                    {
+                        "mitre_techniques": MITRE_MAPPING.get(
+                            r.get("final_label", ""), []
+                        )
+                    },
+                )
+
+            try:
+                predicate = _compile_dsl(args.query)
+            except _DSLParseError as exc:
+                console.print(
+                    f"[red]Invalid --query: {exc.msg} "
+                    f"(column {exc.pos + 1})[/red]"
+                )
+                raise SystemExit(2) from exc
+
+            before = len(results)
+            results = [r for r in results if predicate(r)]
+            console.print(
+                f"[dim]Hunt DSL filter kept {len(results)} of {before} rows.[/dim]"
+            )
 
         # If an output file is provided, write JSONL; otherwise pretty-print
         if args.output_file:

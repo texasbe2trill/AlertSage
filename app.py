@@ -12,6 +12,7 @@ The classifier, embedder, database, and LLM helpers are imported from
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import time
 import uuid
@@ -30,14 +31,47 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+logger = logging.getLogger(__name__)
+# setLevel alone is not enough: Python's root logger has no INFO-level
+# handler by default and Streamlit only configures handlers under its
+# own 'streamlit.*' logger namespace. Without a handler attached to
+# OUR logger (or to root), every logger.info call propagates and gets
+# silently dropped, which is what hid the LLM-path diagnostics during
+# the batch debug session. Attaching a StreamHandler here writes to
+# stderr, which streamlit's nohup redirect captures into the
+# /tmp/alertsage-streamlit.log file we tail for diagnostics.
+if not logger.handlers:
+    _diag_handler = logging.StreamHandler()
+    _diag_handler.setLevel(logging.INFO)
+    _diag_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(_diag_handler)
+    # Stop double-printing if Streamlit ever adds a root handler later.
+    logger.propagate = False
+logger.setLevel(logging.INFO)
+
 from src.triage.database import TriageDatabase
 from src.triage.embeddings import get_embedder
+from src.triage.hunt_query import (
+    FIELDS as HUNT_FIELDS,
+    ParseError as HuntParseError,
+    compile_query as compile_hunt_query,
+    field_spec as hunt_field_spec,
+)
 from src.triage.llm_client import list_anthropic_models, list_openai_models
 from src.triage.llm_helpers import (
+    LLM_ASSIST_FALLBACK,
+    LLM_ASSIST_MODES,
+    LLM_ASSIST_OFF,
+    LLM_ASSIST_OVERRIDE,
     MITRE_MAPPING,
+    apply_llm_override,
     build_llm_rationale,
+    effective_rate_window,
     llm_second_opinion,
     soc_triage_hint,
+    with_forced_fallback,
 )
 from src.triage.model import load_vectorizer_and_model
 from src.triage.preprocess import clean_description
@@ -91,6 +125,12 @@ DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
 HF_DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct:cerebras"
 UI_LLM_MAX_TOKENS = 512
 UI_LLM_MAX_INPUT_CHARS = 8000
+# Per-provider rate limits now live in llm_helpers.effective_rate_window
+# (BYOK gets 60/60s, bundled HF demo gets the original 5/60s, local
+# llama.cpp is effectively unlimited). The constants below are kept
+# only as the shared-quota defaults used when the diagnostic caption
+# wants a labeled "demo" number to show; the live cap comes from
+# _provider_rate_window per call.
 RATE_LIMIT_REQS = 5
 RATE_LIMIT_WINDOW_S = 60
 
@@ -305,7 +345,12 @@ _DEFAULTS: dict[str, Any] = {
     "investigate_text": "",
     # LLM provider state (kept in session only; never persisted)
     "llm_provider": None,
+    # use_llm is the legacy boolean; llm_assist_mode is the 3-way
+    # selector that supersedes it (off / fallback / override). The
+    # boolean is derived from the mode at sidebar render time so any
+    # legacy reads keep working.
     "use_llm": True,
+    "llm_assist_mode": LLM_ASSIST_FALLBACK,
     "hf_model_id": HF_DEFAULT_MODEL,
     "selected_hf_token": "",
     "hf_byo_token": False,
@@ -381,6 +426,42 @@ def _env(*names: str) -> str:
 # =============================================================================
 # LLM PROVIDER PLUMBING
 # =============================================================================
+
+def _should_invoke_llm(result: dict, mode: str, threshold: float) -> bool:
+    """Decide whether the LLM should run for this single classifier result.
+
+    - off: never call.
+    - override: always call. The LLM classifies every event; sklearn
+      stays as the fast pre-pass that we keep for diagnostics and as
+      the fallback when the LLM declines or errors.
+    - fallback: call only when sklearn looks shaky. 'Shaky' means the
+      label landed on 'uncertain' OR the top-class probability barely
+      crossed the threshold (within +0.1). The cushion catches the
+      'just over the line so labeled but probably wrong' cases that
+      would otherwise sail past the existing 'uncertain'-only check.
+    """
+    if mode == LLM_ASSIST_OFF:
+        logger.info("LLM gate: SKIP mode=off")
+        return False
+    if mode == LLM_ASSIST_OVERRIDE:
+        logger.info(
+            "LLM gate: INVOKE mode=override label=%s conf=%.3f",
+            result.get("final_label"),
+            float(result.get("max_prob") or 0.0),
+        )
+        return True
+    label = result.get("final_label")
+    max_prob = float(result.get("max_prob") or 0.0)
+    invoke = label == "uncertain" or max_prob < (threshold + 0.1)
+    logger.info(
+        "LLM gate: %s mode=fallback label=%s conf=%.3f cushion_threshold=%.3f",
+        "INVOKE" if invoke else "SKIP",
+        label,
+        max_prob,
+        threshold + 0.1,
+    )
+    return invoke
+
 
 def _resolve_llm_settings() -> dict[str, Any]:
     """Snapshot the provider configuration from session/secrets/env.
@@ -491,14 +572,44 @@ def _build_llm_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def _byok_present(provider: str) -> bool:
+    """Has the user pasted their own API key for this provider?
+
+    Reads only session_state, never secrets/env, because BYOK status
+    is what determines who pays for the call. A bundled secret token
+    is shared across every visitor and stays under the modest demo
+    cap; a session-state key is the user's own quota and gets the
+    higher BYOK cap.
+    """
+    if provider == "openai":
+        return bool(st.session_state.get("selected_openai_api_key"))
+    if provider == "anthropic":
+        return bool(st.session_state.get("selected_anthropic_api_key"))
+    if provider == "huggingface":
+        return bool(st.session_state.get("selected_hf_token"))
+    return False
+
+
+def _provider_rate_window(provider: str) -> tuple[int, int]:
+    """Live (cap, window_seconds) for the current session and provider."""
+    return effective_rate_window(provider, byok_present=_byok_present(provider))
+
+
 def _provider_rate_check(provider: str) -> tuple[bool, float]:
-    """Per-provider sliding-window rate limiter (session scoped)."""
+    """Per-provider sliding-window rate limiter (session scoped).
+
+    The cap and window come from _provider_rate_window so BYOK calls
+    are not throttled at the demo-fallback rate. The previous global
+    5/60s starved batch runs against hosted providers; see the
+    earlier user-reported 'rate-limited: 20 of 25' diagnostic.
+    """
+    cap, window = _provider_rate_window(provider)
     bucket_key = f"_rl_{provider}"
     now = datetime.now(timezone.utc).timestamp()
-    window_start = now - RATE_LIMIT_WINDOW_S
+    window_start = now - window
     timestamps = [t for t in st.session_state.get(bucket_key, []) if t >= window_start]
-    if len(timestamps) >= RATE_LIMIT_REQS:
-        retry_after = RATE_LIMIT_WINDOW_S - (now - timestamps[0])
+    if len(timestamps) >= cap:
+        retry_after = window - (now - timestamps[0])
         st.session_state[bucket_key] = timestamps
         return False, max(retry_after, 0.0)
     timestamps.append(now)
@@ -507,9 +618,17 @@ def _provider_rate_check(provider: str) -> tuple[bool, float]:
 
 
 def run_llm_second_opinion(
-    text: str, *, skip_preprocessing: bool = False
+    text: str,
+    *,
+    skip_preprocessing: bool = False,
+    force_classification: bool = False,
 ) -> tuple[dict | None, str | None]:
-    """Single dispatch helper used by every page that calls the LLM."""
+    """Single dispatch helper used by every page that calls the LLM.
+
+    force_classification swaps the prompt so 'uncertain' is forbidden;
+    used by run_llm_with_forced_fallback for the second-pass retry
+    when the first pass hedged.
+    """
     settings = _resolve_llm_settings()
     kwargs = _build_llm_kwargs(settings)
     provider = kwargs["provider"]
@@ -524,11 +643,39 @@ def run_llm_second_opinion(
             text,
             skip_preprocessing=skip_preprocessing,
             max_tokens=UI_LLM_MAX_TOKENS,
+            force_classification=force_classification,
             **kwargs,
         )
         return opinion, None
     except Exception as exc:  # pragma: no cover - network dependent
         return None, str(exc)
+
+
+def run_llm_with_forced_fallback(
+    text: str, *, skip_preprocessing: bool = False
+) -> tuple[dict | None, str | None, dict]:
+    """Rate-limited wrapper around the pure with_forced_fallback
+    orchestrator. The orchestrator lives in llm_helpers.py so it can
+    be unit-tested with a stub classifier; this function wires in the
+    real, rate-limited classifier and emits a diagnostic log line so
+    we can grep one event end-to-end in /tmp/alertsage-streamlit.log.
+    """
+    opinion, err, details = with_forced_fallback(
+        run_llm_second_opinion,
+        text,
+        skip_preprocessing=skip_preprocessing,
+    )
+    logger.info(
+        "LLM call: first_pass=%s err=%r force_attempted=%s force_pass=%s "
+        "force_err=%r final_label=%s",
+        details.get("first_pass_label"),
+        details.get("first_pass_err"),
+        details.get("force_pass_attempted"),
+        details.get("force_pass_label"),
+        details.get("force_pass_err"),
+        opinion.get("label") if opinion else None,
+    )
+    return opinion, err, details
 
 
 # =============================================================================
@@ -1365,7 +1512,21 @@ def _build_coverage_report(results: list[dict]) -> pd.DataFrame:
     for r in results:
         label = r.get("final_label", "uncertain")
         sev = severity_for(label)
-        for tech in MITRE_MAPPING.get(label, []):
+        techs = MITRE_MAPPING.get(label, [])
+        if not techs:
+            # Some labels (uncertain, benign_activity) intentionally
+            # have no MITRE techniques. Without a synthetic Unmapped
+            # bucket, those events vanish from the coverage CSV and
+            # tactic rollup, so the per-batch totals don't reconcile
+            # against the triage results CSV. Group by label so the
+            # user can see the breakdown of what didn't map.
+            key = ("UNMAPPED", "Unmapped", "(no MITRE technique)", label)
+            cell_counts[key] = cell_counts.get(key, 0) + 1
+            sev_breakdown.setdefault(
+                ("UNMAPPED", "(no MITRE technique)"), Counter()
+            )[sev] += 1
+            continue
+        for tech in techs:
             tactic = technique_to_tactic.get(tech.upper(), ("UNMAPPED", "Unmapped"))
             key = (tactic[0], tactic[1], tech, label)
             cell_counts[key] = cell_counts.get(key, 0) + 1
@@ -1863,6 +2024,12 @@ def demo_generator_fragment() -> None:
     """
     if not demo_generator_active():
         return
+    # Once the user opts to clear demo data before a batch run, stay
+    # paused for the rest of the session so the emitter doesn't
+    # immediately reseed one row at a time and re-pollute the
+    # dashboards the user just cleaned up.
+    if st.session_state.get("_demo_emitter_paused"):
+        return
     last = st.session_state.get(_DEMO_LAST_KEY, 0.0)
     now_ts = time.time()
     if now_ts - last < 7:
@@ -2054,11 +2221,58 @@ def render_sidebar() -> None:
         "Text preprocessing",
         value=bool(st.session_state.get("use_preprocessing", True)),
     )
-    st.session_state["use_llm"] = st.sidebar.checkbox(
-        "LLM second opinion",
-        value=bool(st.session_state.get("use_llm", True)),
-        help="Adds a provider-routed LLM rationale on top of the classifier.",
+    # LLM assist mode replaces the old boolean checkbox. Off keeps the
+    # sklearn output untouched. Fallback (default, matches the prior
+    # checkbox-on behavior) calls the LLM only when sklearn looks
+    # shaky. Override calls the LLM on every event and lets it set
+    # the label whenever the LLM commits to a canonical class.
+    _existing_mode = st.session_state.get("llm_assist_mode")
+    if _existing_mode not in LLM_ASSIST_MODES:
+        # Migrate from legacy boolean if no mode is set yet.
+        _existing_mode = (
+            LLM_ASSIST_FALLBACK
+            if bool(st.session_state.get("use_llm", True))
+            else LLM_ASSIST_OFF
+        )
+    _mode_labels = {
+        LLM_ASSIST_OFF: "Off",
+        LLM_ASSIST_FALLBACK: "Fallback",
+        LLM_ASSIST_OVERRIDE: "Override",
+    }
+    st.session_state["llm_assist_mode"] = st.sidebar.radio(
+        "LLM assist mode",
+        options=list(LLM_ASSIST_MODES),
+        index=list(LLM_ASSIST_MODES).index(_existing_mode),
+        format_func=lambda m: _mode_labels[m],
+        help=(
+            "Off: sklearn classifier only. "
+            "Fallback: LLM runs only when sklearn is uncertain or "
+            "barely above threshold. "
+            "Override: LLM classifies every event."
+        ),
     )
+    # Keep the legacy boolean in sync so any code path that still reads
+    # use_llm (DB persistence, older callers) stays consistent.
+    st.session_state["use_llm"] = (
+        st.session_state["llm_assist_mode"] != LLM_ASSIST_OFF
+    )
+
+    # Effective rate-limit hint for the active provider, so the user
+    # can see at a glance whether they're on the BYOK budget or the
+    # shared demo cap. Suppressed when LLM mode is Off because no
+    # calls will be made anyway.
+    if st.session_state["llm_assist_mode"] != LLM_ASSIST_OFF:
+        _rl_provider = (
+            _resolve_llm_settings().get("provider") or _default_provider()
+        )
+        _rl_cap, _rl_window = _provider_rate_window(_rl_provider)
+        if _rl_provider == "local":
+            _rl_label = "Local: unlimited"
+        elif _byok_present(_rl_provider):
+            _rl_label = f"BYOK: {_rl_cap} calls/{_rl_window}s"
+        else:
+            _rl_label = f"Demo token: {_rl_cap} calls/{_rl_window}s"
+        st.sidebar.caption(_rl_label)
 
     st.sidebar.markdown("---")
 
@@ -2401,6 +2615,23 @@ def view_overview() -> None:
         breadcrumb="Dashboards / Overview",
     )
 
+    # Empty-state explainer: if the user just cleared demo data and ran
+    # a small CSV, the dashboard will look almost-empty. A one-line
+    # caption is gentler than letting the panels render with sparse
+    # data and no context. Threshold of 5 picks up the realistic
+    # "fresh after demo clear" state without false-firing for a
+    # populated install.
+    try:
+        _hist_count = _db().count_history()
+    except Exception:
+        _hist_count = None
+    if _hist_count is not None and _hist_count < 5:
+        st.caption(
+            f"Only {_hist_count} analyses in history. Run a few more from "
+            "Investigate or Batch, or backfill demo data from Settings then "
+            "Backfill history to populate the dashboard."
+        )
+
     # KPI strip (auto-refresh)
     _overview_kpi_fragment()
 
@@ -2716,10 +2947,11 @@ def view_investigate() -> None:
 
         opinion = None
         opinion_ms = None
-        if st.session_state.get("use_llm", True):
+        mode = st.session_state.get("llm_assist_mode", LLM_ASSIST_FALLBACK)
+        if _should_invoke_llm(result, mode, threshold):
             with st.spinner("Querying LLM second opinion..."):
                 t0 = time.time()
-                opinion, err = run_llm_second_opinion(
+                opinion, err, _details = run_llm_with_forced_fallback(
                     text,
                     skip_preprocessing=not st.session_state.get("use_preprocessing", True),
                 )
@@ -2729,23 +2961,16 @@ def view_investigate() -> None:
         result["llm_opinion"] = opinion
         result["llm_ms"] = opinion_ms
 
-        # When the LLM commits to a concrete label, let it drive the
-        # label, MITRE techniques and kill-chain enrichment. The LLM
-        # has the full narrative in front of it and is the smarter
-        # model; the TF-IDF classifier is a fast first-pass filter
-        # whose vocabulary is fixed at training time, so it routinely
-        # misroutes events that use slightly different wording. We
-        # only fall back to the classifier label when the LLM itself
-        # punted to "uncertain".
-        if opinion and opinion.get("label") and opinion.get("label") != "uncertain":
-            result["final_label"] = opinion["label"]
-            mitre_ids = opinion.get("mitre_ids") or []
-            if mitre_ids:
-                result["mitre_techniques"] = mitre_ids
-            else:
-                result["mitre_techniques"] = MITRE_MAPPING.get(
-                    opinion["label"], []
-                )
+        # When the LLM commits to a concrete canonical label, let it
+        # drive the label and MITRE techniques. The LLM has the full
+        # narrative in front of it and is the smarter model; the
+        # TF-IDF classifier is a fast first-pass filter whose
+        # vocabulary is fixed at training time, so it routinely
+        # misroutes events that use slightly different wording.
+        # apply_llm_override is the shared helper that gates on label
+        # vocab so out-of-vocab LLM responses can never make the
+        # result worse than sklearn alone.
+        apply_llm_override(result, opinion)
 
         result["analysis_id"] = _persist_analysis(result, batch_id=None)
         st.session_state["current_analysis"] = result
@@ -3022,15 +3247,270 @@ def _bookmark_current(result: dict) -> None:
 # HUNT PAGE
 # =============================================================================
 
+_HUNT_QUERY_KEY = "hunt_query"
+_HUNT_DEFAULT_QUERY = "last:7d"
+
+
+def _legacy_payload_to_dsl(payload: dict) -> str:
+    """Convert an old saved-search filter payload to a DSL query string.
+
+    Older saved searches stored individual filter widgets (label_filter,
+    sev_filter, min_conf, ...) instead of a single query string. This
+    rebuilds an equivalent DSL expression so existing pinned searches
+    keep working after the Hunt-tab redesign.
+    """
+    q = payload.get("query")
+    if isinstance(q, str) and q.strip():
+        # New format already stores a DSL string; pass through unless it
+        # looks like a bare narrative term (no DSL operators).
+        if any(tok in q for tok in (":", " AND ", " OR ", " NOT ", "(", "[")):
+            return q
+        parts = [f'narrative:"{q.strip()}"']
+    else:
+        parts = []
+
+    for label in payload.get("label_filter") or []:
+        parts.append(f"label:{label}")
+    sevs = payload.get("sev_filter") or []
+    if len(sevs) == 1:
+        parts.append(f"severity:{sevs[0]}")
+    elif len(sevs) > 1:
+        parts.append("(" + " OR ".join(f"severity:{s}" for s in sevs) + ")")
+    try:
+        mc = float(payload.get("min_conf") or 0)
+    except (TypeError, ValueError):
+        mc = 0.0
+    if mc > 0:
+        parts.append(f"confidence:>={mc}")
+    try:
+        ma = int(payload.get("min_anomaly") or 0)
+    except (TypeError, ValueError):
+        ma = 0
+    if ma > 0:
+        parts.append(f"anomaly:>={ma}")
+    tw_map = {
+        "Last hour": "last:1h",
+        "Last 24 hours": "last:24h",
+        "Last 7 days": "last:7d",
+        "Last 30 days": "last:30d",
+    }
+    tw = payload.get("time_window")
+    if tw in tw_map:
+        parts.append(tw_map[tw])
+    return " AND ".join(parts)
+
+
+def _decorate_history_row(row: dict) -> dict:
+    """Pre-compute derived fields the DSL evaluator reads.
+
+    Reuses severity_for / _anomaly_score / get_case_status so the Hunt
+    DSL stays consistent with what the result card and history table
+    show elsewhere.
+    """
+    label = row.get("final_label") or ""
+    try:
+        conf = float(row.get("max_prob") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    aid = row.get("id") or row.get("analysis_id")
+    row["_severity"] = severity_for(label)
+    row["_anomaly"] = _anomaly_score(label, conf)
+    row["_status"] = get_case_status(aid) if aid is not None else "new"
+    row["_dt"] = _safe_dt(row.get("timestamp"))
+    return row
+
+
+def _append_to_query(snippet: str) -> None:
+    """Append a snippet to the hunt query in session state.
+
+    Designed to be wired up as a Streamlit ``on_click`` callback: those
+    callbacks run *before* widgets are instantiated on the next rerun,
+    which is the only safe time to mutate ``st.session_state`` for a
+    key that a widget (here, the Query ``st.text_input``) owns.
+    Calling this function from inside a ``if st.button(...):`` block
+    instead would raise ``StreamlitAPIException`` because the text
+    input has already claimed the key earlier in the same run. Do not
+    call ``st.rerun()`` here -- the click that triggered the callback
+    already produces a rerun, and an explicit rerun inside a callback
+    raises ``NoSessionContext``.
+    """
+    if not snippet:
+        return
+    current = (st.session_state.get(_HUNT_QUERY_KEY) or "").strip()
+    st.session_state[_HUNT_QUERY_KEY] = (
+        f"{current} {snippet}".strip() if current else snippet
+    )
+
+
+def _clear_query() -> None:
+    """Empty the hunt query.
+
+    Same on_click callback contract as ``_append_to_query`` -- runs
+    before the Query text_input is re-instantiated, so it can write
+    to its session-state key without tripping
+    ``StreamlitAPIException``.
+    """
+    st.session_state[_HUNT_QUERY_KEY] = ""
+
+
+def _format_field_snippet(spec, value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    needs_quotes = (" " in value) and not (value.startswith('"') and value.endswith('"'))
+    quoted = f'"{value}"' if needs_quotes else value
+    return f"{spec.name}:{quoted}"
+
+
+_HUNT_QUICK_INSERTS = (
+    "label:malware",
+    "label:phishing",
+    "label:data_exfiltration",
+    "severity:critical",
+    "confidence:>=0.8",
+    "anomaly:>=80",
+    "last:1h",
+    "last:24h",
+    "last:7d",
+    "status:new",
+    "status:contained",
+    "mitre:T1566",
+    "NOT label:benign_activity",
+    "NOT status:closed",
+)
+
+
+def _render_hunt_helpers() -> None:
+    """Field/value picker + quick-insert chips that mutate the query."""
+    st.markdown(
+        '<div style="font-size: 0.72rem; font-weight: 700; '
+        'text-transform: uppercase; letter-spacing: 0.08em; '
+        'color: var(--soc-text-muted); margin: 0.6rem 0 0.35rem 0;">'
+        'Build a clause</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns([1.5, 2, 0.9], gap="small")
+    field_names = [s.name for s in HUNT_FIELDS]
+    with cols[0]:
+        field_choice = st.selectbox(
+            "Field",
+            field_names,
+            key="hunt_helper_field",
+            help="Pick a field, then a value, then click Insert.",
+        )
+    spec = hunt_field_spec(field_choice)
+    # Per-field scoped keys keep each field's selection independent.
+    # Without scoping, the dropdown's saved option leaks to a new field
+    # whose suggestions don't include it, and the two text_inputs (custom
+    # branch + no-suggestions branch) share state across switches.
+    pick_key = f"hunt_helper_value_pick_{field_choice}"
+    text_key = f"hunt_helper_value_text_{field_choice}"
+    with cols[1]:
+        if spec and spec.suggestions:
+            options = ["(custom)", *spec.suggestions]
+            picked = st.selectbox(
+                "Value",
+                options,
+                key=pick_key,
+                help=spec.help or "",
+            )
+            if picked == "(custom)":
+                value = st.text_input(
+                    "Custom value",
+                    key=text_key,
+                    placeholder="Type a value",
+                    label_visibility="collapsed",
+                )
+            else:
+                value = picked
+        else:
+            value = st.text_input(
+                "Value",
+                key=text_key,
+                placeholder=(spec.help or "Value") if spec else "Value",
+            )
+    with cols[2]:
+        st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+        # Compute the snippet up front so it can be passed to the
+        # on_click callback. Streamlit captures callback kwargs at
+        # widget-registration time, which is exactly what we want: the
+        # snippet reflects the field/value selected in this same render.
+        # Mutating st.session_state[_HUNT_QUERY_KEY] inside an
+        # ``if st.button(...):`` block fails because the Query
+        # text_input has already claimed that key earlier in this run.
+        pending_snippet = _format_field_snippet(spec, value)
+        st.button(
+            "Insert",
+            key="hunt_helper_insert",
+            use_container_width=True,
+            disabled=not pending_snippet,
+            on_click=_append_to_query,
+            kwargs={"snippet": pending_snippet},
+        )
+
+    st.markdown(
+        '<div style="font-size: 0.72rem; font-weight: 700; '
+        'text-transform: uppercase; letter-spacing: 0.08em; '
+        'color: var(--soc-text-muted); margin: 0.6rem 0 0.35rem 0;">'
+        'Quick inserts</div>',
+        unsafe_allow_html=True,
+    )
+    chip_cols = st.columns(7, gap="small")
+    for idx, snippet in enumerate(_HUNT_QUICK_INSERTS):
+        with chip_cols[idx % 7]:
+            # Same widget-key-after-instantiation hazard as the Insert
+            # button above: route through on_click so the mutation
+            # happens before the Query text_input claims its key on
+            # the next rerun.
+            st.button(
+                snippet,
+                key=f"hunt_quick_{idx}",
+                use_container_width=True,
+                help="Append to query",
+                on_click=_append_to_query,
+                kwargs={"snippet": snippet},
+            )
+
+
+def _render_hunt_cheatsheet() -> None:
+    with st.expander("DSL cheat sheet", expanded=False):
+        st.markdown(
+            "**Syntax**\n"
+            "- `field:value` — exact / substring / numeric match depending on field.\n"
+            "- `field:\"two words\"` — quote values containing spaces.\n"
+            "- `field:>x  field:<x  field:>=x  field:<=x` — comparisons (numeric / time fields).\n"
+            "- `field:[a TO b]` — inclusive range (numeric / time fields).\n"
+            "- `AND`, `OR`, `NOT`, parentheses, and a leading `-` for NOT.\n"
+            "- A bare term with no field matches the incident narrative.\n\n"
+            "**Examples**\n"
+            "```\n"
+            "label:malware AND confidence:>=0.8\n"
+            "(label:phishing OR label:malware) AND last:24h\n"
+            "severity:critical AND -status:closed\n"
+            "narrative:\"personal dropbox\" confidence:[0.5 TO 1.0]\n"
+            "mitre:T1566 OR mitre:T1190\n"
+            "```\n\n"
+            "**Fields**"
+        )
+        rows = [
+            (s.name, ", ".join(s.aliases) or "—", s.kind, s.help)
+            for s in HUNT_FIELDS
+        ]
+        st.dataframe(
+            pd.DataFrame(rows, columns=["Field", "Aliases", "Kind", "Description"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
 def view_hunt() -> None:
     render_page_header(
         title="Hunt",
-        subtitle="Search past triage results by classification, narrative, or confidence.",
+        subtitle="Lucene-style query language across past triage results.",
         breadcrumb="Console / Hunt",
     )
 
     db = _db()
-    history = []
     try:
         history = db.get_analysis_history(limit=10000) or []
     except Exception as exc:
@@ -3044,118 +3524,79 @@ def view_hunt() -> None:
         )
         return
 
-    # If the user clicked a saved search in the sidebar, prefill the
-    # filters from the pending payload (one-shot apply).
-    pending = st.session_state.pop("pending_search_filters", None) or {}
-    default_query = pending.get("query", "")
-    default_labels = pending.get("label_filter", []) or []
-    default_sev = pending.get("sev_filter", []) or []
-    default_min_conf = float(pending.get("min_conf", 0.0))
-    default_min_anomaly = int(pending.get("min_anomaly", 0))
-    default_time_window = pending.get("time_window", "All time")
+    # Saved searches arrive as a "pending_search_filters" payload from
+    # the sidebar. Translate legacy filter dicts into a DSL string so
+    # old pins keep working, then drop the payload.
+    pending = st.session_state.pop("pending_search_filters", None)
+    if pending:
+        st.session_state[_HUNT_QUERY_KEY] = _legacy_payload_to_dsl(pending)
 
-    # Filters: row 1 (query, classification, severity)
-    row1 = st.columns([3, 2, 2], gap="small")
-    with row1[0]:
-        query = st.text_input(
-            "Search narrative",
-            value=default_query,
-            placeholder="Free text matched against the narrative...",
-        )
-    with row1[1]:
-        all_labels = sorted({h.get("final_label", "uncertain") for h in history})
-        label_filter = st.multiselect(
-            "Classification", all_labels,
-            default=[l for l in default_labels if l in all_labels],
-            placeholder="All classifications",
-        )
-    with row1[2]:
-        sev_filter = st.multiselect(
-            "Severity",
-            ["critical", "high", "medium", "low", "info"],
-            default=[s for s in default_sev
-                     if s in ["critical", "high", "medium", "low", "info"]],
-            placeholder="All severities",
-        )
+    if _HUNT_QUERY_KEY not in st.session_state:
+        st.session_state[_HUNT_QUERY_KEY] = _HUNT_DEFAULT_QUERY
 
-    # Filters: row 2 (confidence, anomaly score, time window)
-    row2 = st.columns([2, 2, 2], gap="small")
-    with row2[0]:
-        min_conf = st.slider("Min confidence", 0.0, 1.0, default_min_conf, 0.05)
-    with row2[1]:
-        min_anomaly = st.slider("Min anomaly score", 0, 100, default_min_anomaly, 5)
-    with row2[2]:
-        time_window_options = [
-            "All time", "Last hour", "Last 24 hours",
-            "Last 7 days", "Last 30 days",
-        ]
-        idx = (
-            time_window_options.index(default_time_window)
-            if default_time_window in time_window_options else 0
+    # 0.6-wide column reserves room for the Clear button next to the
+    # Query input without crowding the Save-as field on the right.
+    query_row = st.columns([3.4, 0.6, 2], gap="medium")
+    with query_row[0]:
+        st.text_input(
+            "Query",
+            key=_HUNT_QUERY_KEY,
+            placeholder='label:malware AND confidence:>=0.8 AND last:24h',
+            help="Lucene-style. AND / OR / NOT, parens, ranges supported.",
         )
-        time_window = st.selectbox(
-            "Time window", time_window_options, index=idx,
+    with query_row[1]:
+        # Spacer matches the height of the Query label so the button
+        # baseline aligns with the text input. Disabled when the query
+        # is already empty so the click is a no-op rather than a rerun.
+        st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+        st.button(
+            "Clear",
+            key="hunt_clear_btn",
+            use_container_width=True,
+            help="Empty the query box",
+            on_click=_clear_query,
+            disabled=not (st.session_state.get(_HUNT_QUERY_KEY) or "").strip(),
         )
-
-    # Save-current-search row
-    save_row = st.columns([3, 1], gap="small")
-    with save_row[0]:
+    with query_row[2]:
         save_name = st.text_input(
-            "Save this search as",
+            "Save as",
             value="",
-            placeholder="e.g. 'High-severity last 24h', 'Phishing only'",
+            placeholder="e.g. 'High-severity last 24h'",
             key="hunt_save_name",
         )
-    with save_row[1]:
-        st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
         if st.button(
-            "Save search", use_container_width=True, key="hunt_save_btn",
+            "Save query",
+            use_container_width=True,
+            key="hunt_save_btn",
             disabled=not save_name.strip(),
         ):
-            save_search(save_name, {
-                "query": query,
-                "label_filter": label_filter,
-                "sev_filter": sev_filter,
-                "min_conf": min_conf,
-                "min_anomaly": min_anomaly,
-                "time_window": time_window,
-            })
+            save_search(save_name, {"query": st.session_state[_HUNT_QUERY_KEY]})
             st.toast(f"Saved: {save_name}", icon=None)
 
-    # Apply filters
-    now = datetime.now()
-    cutoff: datetime | None = None
-    if time_window == "Last hour":
-        cutoff = now - timedelta(hours=1)
-    elif time_window == "Last 24 hours":
-        cutoff = now - timedelta(hours=24)
-    elif time_window == "Last 7 days":
-        cutoff = now - timedelta(days=7)
-    elif time_window == "Last 30 days":
-        cutoff = now - timedelta(days=30)
+    _render_hunt_helpers()
+    _render_hunt_cheatsheet()
 
-    rows = []
-    for h in history:
-        if query and query.lower() not in (h.get("incident_text") or "").lower():
-            continue
-        if label_filter and h.get("final_label") not in label_filter:
-            continue
-        if sev_filter and severity_for(h.get("final_label", "")) not in sev_filter:
-            continue
-        try:
-            conf = float(h.get("max_prob") or 0)
-        except Exception:
-            conf = 0
-        if conf < min_conf:
-            continue
-        anomaly = _anomaly_score(h.get("final_label", ""), conf)
-        if anomaly < min_anomaly:
-            continue
-        if cutoff is not None:
-            dt = _safe_dt(h.get("timestamp"))
-            if not dt or dt < cutoff:
-                continue
-        rows.append(h)
+    query = st.session_state.get(_HUNT_QUERY_KEY, "")
+    decorated = [_decorate_history_row(dict(h)) for h in history]
+
+    try:
+        predicate = compile_hunt_query(query)
+    except HuntParseError as exc:
+        caret = " " * exc.pos + "^"
+        st.error(
+            f"Query error: {exc.msg} (column {exc.pos + 1})\n\n"
+            f"```\n{query}\n{caret}\n```"
+        )
+        return
+    except Exception as exc:
+        st.error(f"Query error: {exc}")
+        return
+
+    try:
+        rows = [r for r in decorated if predicate(r)]
+    except HuntParseError as exc:
+        st.error(f"Query error: {exc.msg}")
+        return
 
     render_section_head(
         "Results",
@@ -3163,7 +3604,10 @@ def view_hunt() -> None:
     )
 
     if not rows:
-        render_empty("No matches", "Loosen your filters to see results.")
+        render_empty(
+            "No matches",
+            "Loosen the query, drop a clause, or widen the time window.",
+        )
         return
 
     rows = sorted(rows, key=lambda x: x.get("timestamp", ""), reverse=True)
@@ -3239,13 +3683,56 @@ def view_hunt() -> None:
     if len(rows) > LIMIT:
         st.caption(
             f"Showing first {LIMIT} interactive of {len(rows):,} matches. "
-            "Tighten the filters above to drill into more."
+            "Tighten the query (e.g. add `confidence:>=0.9` or `last:1h`) "
+            "to drill into more."
         )
 
 
 # =============================================================================
 # BATCH PAGE
 # =============================================================================
+
+
+def _batch_settings_snapshot() -> dict[str, Any]:
+    """Snapshot the sidebar inputs that materially shape batch output.
+
+    Compared on every render against the snapshot taken when the
+    cached results were produced; a divergence drives the drift
+    warning at the top of the dashboard. Only the fields the analysis
+    loop actually reads are included, so a no-op sidebar tweak (e.g.
+    LLM provider switched while use_llm is off) won't trip the warning.
+    API keys are intentionally excluded: rotating a key for the same
+    provider/model produces equivalent output and shouldn't pester
+    the user.
+    """
+    snap: dict[str, Any] = {
+        "threshold": float(st.session_state.get("threshold", 0.5)),
+        "max_classes": int(st.session_state.get("max_classes", 5)),
+        "llm_assist_mode": st.session_state.get(
+            "llm_assist_mode", LLM_ASSIST_FALLBACK
+        ),
+    }
+    if snap["llm_assist_mode"] != LLM_ASSIST_OFF:
+        llm = _resolve_llm_settings()
+        provider = llm.get("provider")
+        snap["llm_provider"] = provider
+        if provider == "openai":
+            snap["llm_model"] = llm.get("openai_model")
+        elif provider == "anthropic":
+            snap["llm_model"] = llm.get("anthropic_model")
+        else:
+            snap["llm_model"] = llm.get("hf_model")
+    return snap
+
+
+_BATCH_SETTING_LABELS = {
+    "threshold": "threshold",
+    "max_classes": "max classes",
+    "llm_assist_mode": "LLM assist mode",
+    "llm_provider": "LLM provider",
+    "llm_model": "LLM model",
+}
+
 
 def view_batch() -> None:
     render_page_header(
@@ -3284,9 +3771,35 @@ def view_batch() -> None:
         )
 
     if uploaded is None:
+        # Upload cleared or never set: drop any stale results so the
+        # next upload starts clean and download buttons from a prior
+        # batch don't keep dangling on screen.
+        for key in (
+            "batch_results",
+            "batch_id",
+            "batch_elapsed",
+            "batch_text_col",
+            "batch_settings",
+            "batch_llm_invoked",
+            "batch_llm_overrode",
+            "batch_llm_mode",
+            "batch_force_pass_fired",
+            "batch_rate_limited",
+            "batch_provider_failures",
+            "batch_provider_failure_messages",
+            "batch_still_uncertain",
+        ):
+            st.session_state.pop(key, None)
         return
 
+    # Streamlit's UploadedFile is BytesIO-backed and the same instance
+    # is reused across reruns. pandas.read_csv advances the position to
+    # EOF; without seeking back to 0 first, every rerun after the
+    # initial parse (e.g. a download_button click) would re-read from
+    # EOF, raise EmptyDataError, and early-return before the dashboard
+    # render block could pick up the cached batch_results.
     try:
+        uploaded.seek(0)
         df = pd.read_csv(uploaded)
     except Exception as exc:
         st.error(f"Could not read CSV: {exc}")
@@ -3305,38 +3818,289 @@ def view_batch() -> None:
     df = df.head(500).copy()
     st.caption(f"Detected {len(df)} rows. Using column: `{text_col}`.")
 
-    if not st.button("Run batch", type="primary", key="batch_run"):
+    # Demo data detected: surface the option to wipe synthetic rows
+    # before the user batch lands, so Overview / Hunt / Settings views
+    # don't mix demo and user data. Default-checked because the user
+    # is past the demo phase by virtue of uploading their own CSV;
+    # they can always rebuild via Settings then Backfill history.
+    try:
+        _demo_count = _db().count_demo_events()
+    except Exception:
+        _demo_count = 0
+    if _demo_count > 0:
+        st.info(
+            f"Demo data detected: **{_demo_count:,}** synthetic incidents are "
+            "in your database. Running batch analysis on your CSV will mix "
+            "your results with demo data in the Overview, Hunt, and Settings "
+            "views."
+        )
+        st.checkbox(
+            "Clear demo data before running this batch (recommended)",
+            value=True,
+            key="batch_clear_demo_before_run",
+            help=(
+                "Removes the synthetic events from analysis history. "
+                "Bookmarks of demo events stay (they keep their incident "
+                "text) but lose their link to the analysis row. "
+                "Reversible: rebuild from Settings then Backfill history."
+            ),
+        )
+
+    # Run is a one-shot trigger: st.button only returns True on the
+    # rerun that immediately follows the click. The analysis output and
+    # the download buttons used to live below an `if not st.button(...):
+    # return` guard, so any subsequent rerun (e.g. a download_button
+    # click) returned early and wiped the whole batch dashboard. Now
+    # the analysis runs once on the click and stashes its outputs in
+    # session_state; the dashboard renders from session_state on every
+    # rerun that has data.
+    if st.button("Run batch", type="primary", key="batch_run"):
+        # Clear demo data first if the user opted in via the checkbox
+        # above. Done before the redo-deletion block so the order of
+        # operations is: demo wipe -> redo wipe -> fresh analysis.
+        # Setting _demo_emitter_paused stops the periodic 8s emitter
+        # from immediately reseeding one row at a time for the rest
+        # of this Streamlit session; a fresh app reload restarts it.
+        if (
+            _demo_count > 0
+            and st.session_state.get("batch_clear_demo_before_run", True)
+        ):
+            try:
+                cleared = _clear_demo_events()
+                st.session_state["_demo_emitter_paused"] = True
+                logger.info(
+                    "Demo clear before user batch: removed %d demo rows; "
+                    "emitter paused for the rest of this session.",
+                    cleared,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Demo clear before user batch failed: %s", exc
+                )
+
+        # If a prior batch is still cached in session state, this click
+        # is a redo on the same upload (a fresh upload would have run
+        # the pop loop above and cleared batch_id). Drop the prior
+        # batch's analysis_history rows so the redo replaces them
+        # instead of stacking next to obsolete records.
+        prior_id = st.session_state.get("batch_id")
+        if prior_id:
+            try:
+                deleted = _db().delete_batch(prior_id)
+                logger.info(
+                    "Batch redo: deleted %d prior rows for batch %s",
+                    deleted,
+                    prior_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Batch redo: failed to delete prior batch %s: %s",
+                    prior_id,
+                    exc,
+                )
+
+        progress = st.progress(0)
+        status = st.empty()
+        batch_id = str(uuid.uuid4())[:8]
+        threshold = float(st.session_state.get("threshold", 0.5))
+        max_classes = int(st.session_state.get("max_classes", 5))
+        mode = st.session_state.get("llm_assist_mode", LLM_ASSIST_FALLBACK)
+
+        results = []
+        llm_invoked = 0
+        llm_overrode = 0
+        force_pass_fired = 0
+        rate_limited = 0
+        provider_failures = 0
+        provider_failure_messages: list[str] = []
+        still_uncertain = 0
+        total = len(df)
+        t_start = time.time()
+        logger.info("Batch start: id=%s mode=%s rows=%d", batch_id, mode, total)
+        for i, row in enumerate(df[text_col].fillna("").astype(str).tolist()):
+            status.markdown(
+                f'<div class="soc-mono" style="color: var(--soc-text-secondary); font-size: 0.85rem;">'
+                f'Processing {i+1:,} / {total:,}  ·  batch {batch_id}</div>',
+                unsafe_allow_html=True,
+            )
+            if not row.strip():
+                continue
+            result = predict(row, threshold=threshold, max_classes=max_classes)
+            logger.info(
+                "[batch=%s][row=%d] sklearn label=%s conf=%.3f",
+                batch_id, i + 1,
+                result.get("final_label"),
+                float(result.get("max_prob") or 0.0),
+            )
+            # Mirror Investigate's flow so batch outputs reflect LLM
+            # judgment too. Without apply_llm_override here the LLM
+            # was being called and billed in the prior code, but its
+            # label was never used: the persisted final_label stayed
+            # as sklearn's best guess (often 'uncertain'), which is
+            # what made the user's 25-event sample show 14 unmapped.
+            if _should_invoke_llm(result, mode, threshold):
+                opinion, err, details = run_llm_with_forced_fallback(
+                    row, skip_preprocessing=False
+                )
+                result["llm_opinion"] = opinion
+                llm_invoked += 1
+                if details.get("force_pass_attempted"):
+                    force_pass_fired += 1
+                # Single side-effecting call. apply_llm_override returns
+                # False without mutating when opinion is None or label
+                # is 'uncertain', so calling it once and branching on
+                # the return is safe and avoids the double-mutation
+                # hazard of calling it inside two if-branches.
+                overrode = apply_llm_override(result, opinion)
+                # Distinguish rate-limit drops from genuine parse/auth
+                # failures so the diagnostics caption can point to the
+                # right knob to turn. effective_err covers both the
+                # force-pass error and the first-pass error (the
+                # wrapper returns the first-pass opinion + force-pass
+                # err on rate-limit during the second call).
+                effective_err = err or details.get("first_pass_err")
+                if overrode:
+                    llm_overrode += 1
+                elif effective_err and "rate limit" in effective_err.lower():
+                    rate_limited += 1
+                elif effective_err or not opinion:
+                    provider_failures += 1
+                    # Stash distinct error messages so the post-batch
+                    # warning surfaces what actually went wrong (auth
+                    # missing, model loading, content policy, etc.)
+                    # instead of just a counter. Bounded by the
+                    # warning's display cap of 3, but we keep more
+                    # in case we want to expand later.
+                    if (
+                        effective_err
+                        and effective_err not in provider_failure_messages
+                        and len(provider_failure_messages) < 12
+                    ):
+                        provider_failure_messages.append(effective_err)
+                # else: LLM responded with 'uncertain' that the
+                # force-pass also couldn't escape. That row falls
+                # through and shows up in the still_uncertain bucket
+                # below.
+            if result.get("final_label") == "uncertain":
+                still_uncertain += 1
+                logger.info(
+                    "[batch=%s][row=%d] STILL_UNCERTAIN after LLM path",
+                    batch_id, i + 1,
+                )
+            result["analysis_id"] = _persist_analysis(result, batch_id=batch_id)
+            results.append(result)
+            progress.progress((i + 1) / total)
+
+        elapsed = time.time() - t_start
+        progress.empty()
+        status.empty()
+
+        # Decorate so the Hunt DSL can filter batch results just like
+        # history rows (`_severity`, `_anomaly`, `_status`, `_dt`).
+        for r in results:
+            _decorate_history_row(r)
+
+        st.session_state["batch_results"] = results
+        st.session_state["batch_id"] = batch_id
+        st.session_state["batch_elapsed"] = elapsed
+        st.session_state["batch_text_col"] = text_col
+        st.session_state["batch_llm_invoked"] = llm_invoked
+        st.session_state["batch_llm_overrode"] = llm_overrode
+        st.session_state["batch_llm_mode"] = mode
+        st.session_state["batch_force_pass_fired"] = force_pass_fired
+        st.session_state["batch_rate_limited"] = rate_limited
+        st.session_state["batch_provider_failures"] = provider_failures
+        st.session_state["batch_provider_failure_messages"] = (
+            provider_failure_messages
+        )
+        st.session_state["batch_still_uncertain"] = still_uncertain
+        st.session_state["batch_settings"] = _batch_settings_snapshot()
+        logger.info(
+            "Batch end: id=%s invoked=%d overrode=%d force=%d "
+            "rate_limited=%d provider_failures=%d still_uncertain=%d",
+            batch_id, llm_invoked, llm_overrode, force_pass_fired,
+            rate_limited, provider_failures, still_uncertain,
+        )
+
+    if "batch_results" not in st.session_state:
         return
 
-    progress = st.progress(0)
-    status = st.empty()
-    batch_id = str(uuid.uuid4())[:8]
-    threshold = float(st.session_state.get("threshold", 0.5))
-    max_classes = int(st.session_state.get("max_classes", 5))
-    use_llm = bool(st.session_state.get("use_llm", False))
+    # Pull from session_state on every render so download_button clicks
+    # (which trigger a full page rerun) and DSL filter edits don't lose
+    # the analysis output. The CSV byte payloads passed into the three
+    # download_buttons below get re-derived from these results on each
+    # render; the derivation is pure pandas with no IO and produces
+    # identical bytes for the same inputs, so the click that triggered
+    # the rerun still resolves against stable data.
+    results = st.session_state["batch_results"]
+    batch_id = st.session_state["batch_id"]
+    elapsed = st.session_state["batch_elapsed"]
 
-    results = []
-    total = len(df)
-    t_start = time.time()
-    for i, row in enumerate(df[text_col].fillna("").astype(str).tolist()):
-        status.markdown(
-            f'<div class="soc-mono" style="color: var(--soc-text-secondary); font-size: 0.85rem;">'
-            f'Processing {i+1:,} / {total:,}  ·  batch {batch_id}</div>',
-            unsafe_allow_html=True,
+    # Drift warning: if any sidebar input that materially affects the
+    # analysis has changed since the cached run, name the diff and
+    # prompt the user to click Run again. We don't auto-rerun because
+    # that would silently re-bill the LLM and could surprise the user
+    # mid-investigation; the warning leaves the prior dashboard fully
+    # usable (downloads still work) and just explains why the chart
+    # doesn't reflect the current sliders.
+    cached_settings = st.session_state.get("batch_settings") or {}
+    current_settings = _batch_settings_snapshot()
+    drift_keys = [
+        k for k in (set(cached_settings) | set(current_settings))
+        if cached_settings.get(k) != current_settings.get(k)
+    ]
+    if drift_keys:
+        labels = ", ".join(
+            _BATCH_SETTING_LABELS.get(k, k) for k in sorted(drift_keys)
         )
-        if not row.strip():
-            continue
-        result = predict(row, threshold=threshold, max_classes=max_classes)
-        if use_llm:
-            opinion, _ = run_llm_second_opinion(row, skip_preprocessing=False)
-            result["llm_opinion"] = opinion
-        result["analysis_id"] = _persist_analysis(result, batch_id=batch_id)
-        results.append(result)
-        progress.progress((i + 1) / total)
+        st.warning(
+            f"Settings changed since last run: {labels}. "
+            "Click Run batch to re-analyze with the current settings."
+        )
 
-    elapsed = time.time() - t_start
-    progress.empty()
-    status.empty()
+    st.markdown("</br>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size: 0.72rem; font-weight: 700; '
+        'text-transform: uppercase; letter-spacing: 0.08em; '
+        'color: var(--soc-text-muted); margin: 0.4rem 0 0.35rem 0;">'
+        'Filter results (DSL)</div>',
+        unsafe_allow_html=True,
+    )
+    batch_query = st.text_input(
+        "Filter",
+        value="",
+        placeholder='label:malware AND confidence:>=0.8',
+        help="Lucene-style query. Same DSL as the Hunt tab. Leave empty to keep all rows.",
+        key=f"batch_query_{batch_id}",
+        label_visibility="collapsed",
+    )
+
+    filtered = results
+    if batch_query.strip():
+        try:
+            predicate = compile_hunt_query(batch_query)
+            filtered = [r for r in results if predicate(r)]
+        except HuntParseError as exc:
+            caret = " " * exc.pos + "^"
+            st.error(
+                f"Query error: {exc.msg} (column {exc.pos + 1})\n\n"
+                f"```\n{batch_query}\n{caret}\n```"
+            )
+            filtered = results
+        except Exception as exc:
+            st.error(f"Query error: {exc}")
+            filtered = results
+
+    st.caption(
+        f"Showing {len(filtered):,} of {len(results):,} results."
+        if batch_query.strip()
+        else f"{len(results):,} rows in this batch."
+    )
+
+    # Aggregates downstream operate on the filtered subset so KPIs,
+    # distribution, MITRE coverage, and exports all stay consistent
+    # with what the analyst is currently looking at.
+    results = filtered
 
     sev_counts: Counter[str] = Counter(severity_for(r["final_label"]) for r in results)
     label_counts: Counter[str] = Counter(r["final_label"] for r in results)
@@ -3413,6 +4177,81 @@ def view_batch() -> None:
 
     # ---- Exports ----
     render_section_head("Exports", action="download artifacts")
+    # Reconciliation caption: the triage CSV has one row per event, but
+    # the MITRE coverage and tactic rollup exports group by technique,
+    # which can multiply rows (events with multiple techniques) and
+    # historically dropped rows (events whose label has no technique).
+    # The Unmapped bucket added in _build_coverage_report keeps the
+    # coverage totals reconcilable; this caption summarizes the split
+    # so the user can sanity-check at a glance.
+    _mapped_events = sum(
+        1 for r in results if MITRE_MAPPING.get(r.get("final_label", "uncertain"))
+    )
+    _unmapped_events = len(results) - _mapped_events
+    st.caption(
+        f"Total events: {len(results):,}  ·  "
+        f"Mapped to MITRE: {_mapped_events:,}  ·  "
+        f"Unmapped: {_unmapped_events:,}"
+    )
+    # Cost-transparency line: shows how many events the LLM was actually
+    # called for and how many of those calls produced a label override.
+    # In Override mode "called" equals total; in Fallback mode it's the
+    # subset where sklearn was uncertain or barely above threshold; in
+    # Off mode this line is suppressed because there's nothing to say.
+    _llm_mode = st.session_state.get("batch_llm_mode", LLM_ASSIST_OFF)
+    if _llm_mode != LLM_ASSIST_OFF:
+        _llm_invoked = int(st.session_state.get("batch_llm_invoked", 0))
+        _llm_overrode = int(st.session_state.get("batch_llm_overrode", 0))
+        _force_fired = int(st.session_state.get("batch_force_pass_fired", 0))
+        _rate_limited = int(st.session_state.get("batch_rate_limited", 0))
+        _provider_fail = int(
+            st.session_state.get("batch_provider_failures", 0)
+        )
+        _provider_fail_msgs = list(
+            st.session_state.get("batch_provider_failure_messages", []) or []
+        )
+        _still_unc = int(st.session_state.get("batch_still_uncertain", 0))
+        _mode_label = {
+            LLM_ASSIST_FALLBACK: "Fallback mode",
+            LLM_ASSIST_OVERRIDE: "Override mode",
+        }.get(_llm_mode, _llm_mode)
+        st.caption(
+            f"LLM-assisted: {_llm_invoked:,} of {len(results):,} events  ·  "
+            f"Override fired: {_llm_overrode:,}  ·  "
+            f"Force-pass fired: {_force_fired:,}  ·  {_mode_label}"
+        )
+        # Diagnostics line: surfaces rate-limit drops, real upstream
+        # provider failures, and events that ended up uncertain
+        # anyway. A high rate-limited count points at the per-
+        # provider cap in llm_helpers.effective_rate_window; a high
+        # provider-failures count points at upstream auth / network
+        # / model-loading / content-policy issues (see the warning
+        # below for the actual error strings); a high
+        # still_uncertain with both other counts low points at the
+        # LLM model genuinely returning uncertain even after force-
+        # pass.
+        st.caption(
+            f"Diagnostics: rate-limited: {_rate_limited:,}  ·  "
+            f"provider-failures: {_provider_fail:,}  ·  "
+            f"uncertain after force: {_still_unc:,}"
+        )
+        # Surface the actual upstream error strings so the user can
+        # tell auth issues from rate limits from model-loading delays
+        # without grepping the streamlit log. Cap at 3 distinct
+        # messages to keep the warning readable; the full set sits in
+        # session_state for anyone who wants to inspect via st.write.
+        if _provider_fail > 0 and _provider_fail_msgs:
+            _shown = _provider_fail_msgs[:3]
+            _bullet_lines = "\n".join(f'- "{m}"' for m in _shown)
+            _suffix = (
+                f" (showing {len(_shown)} of {_provider_fail})"
+                if len(_provider_fail_msgs) < _provider_fail
+                or len(_shown) < len(_provider_fail_msgs)
+                else ""
+            )
+            st.warning(
+                f"Provider failures observed{_suffix}:\n{_bullet_lines}"
+            )
     export_cols = st.columns(3, gap="small")
 
     out_df = pd.DataFrame([

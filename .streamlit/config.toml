@@ -26,3 +26,17 @@ toolbarMode = "minimal"
 
 [logger]
 level = "warning"
+
+# Pin Streamlit chrome to the SOC dark palette so toolbars, spinners,
+# and any element not covered by assets/styles.css can't fall back to
+# the user's OS theme. Values mirror the --soc-* CSS variables in
+# assets/styles.css. Streamlit 1.39 only accepts the three primitive
+# font names, so 'sans serif' is the closest match to the Inter stack
+# that styles.css applies to body text.
+[theme]
+base = "dark"
+primaryColor = "#3b82f6"
+backgroundColor = "#0a0e1a"
+secondaryBackgroundColor = "#111827"
+textColor = "#e2e8f0"
+font = "sans serif"

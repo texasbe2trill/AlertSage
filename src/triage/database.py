@@ -557,6 +557,73 @@ class TriageDatabase:
             cursor.execute("DELETE FROM analysis_history")
             cursor.execute("DELETE FROM batch_analyses")
 
+    def delete_batch(self, batch_id: str) -> int:
+        """Delete every analysis_history row tagged with this batch_id.
+
+        Used when re-running a batch on the same upload so the new run
+        replaces the prior, now-obsolete records instead of stacking
+        next to them. Cascades to bookmarks, notes, and analysis_tags
+        first to respect the foreign keys (matching the deletion order
+        in clear_history).
+
+        Idempotent: a batch_id with no rows is a no-op. Returns the
+        number of analysis_history rows deleted; dependent-table
+        deletions are not counted.
+        """
+        if not batch_id:
+            return 0
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM analysis_history WHERE batch_id = ?",
+                (batch_id,),
+            )
+            ids = [row["id"] for row in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                cursor.execute(
+                    f"DELETE FROM analysis_tags WHERE analysis_id IN ({placeholders})",
+                    ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM notes WHERE analysis_id IN ({placeholders})",
+                    ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM bookmarks WHERE analysis_id IN ({placeholders})",
+                    ids,
+                )
+            cursor.execute(
+                "DELETE FROM analysis_history WHERE batch_id = ?",
+                (batch_id,),
+            )
+            return cursor.rowcount or 0
+
+    def count_history(self) -> int:
+        """Cheap COUNT of analysis_history rows. Used by the Overview
+        empty-state explainer that fires when the dashboard is too
+        sparse to be informative."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM analysis_history")
+            row = cursor.fetchone()
+            return int(row["n"]) if row else 0
+
+    def count_demo_events(self) -> int:
+        """Cheap COUNT of demo-tagged analysis_history rows. Used by
+        the batch page to decide whether to surface a demo-clear
+        prompt above the Run button. The predicate matches the same
+        batch_id used by the demo seeders and by _clear_demo_events
+        so all three stay in lockstep."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) AS n FROM analysis_history WHERE batch_id = ?",
+                ("demo",),
+            )
+            row = cursor.fetchone()
+            return int(row["n"]) if row else 0
+
     def search_history(
         self, search_term: str, limit: int = 100
     ) -> List[Dict[str, Any]]:
