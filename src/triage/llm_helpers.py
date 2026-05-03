@@ -498,47 +498,77 @@ def llm_second_opinion(
         _llm_debug(f"Using PREPROCESSED text for LLM (length: {len(llm_text)} chars)")
 
     system_instructions = (
-        "You are a senior SOC analyst providing a second opinion on an "
-        "incident triage. Your job is to commit to a confident decision "
-        "even when the narrative is ambiguous. The fast classifier may "
-        "have already flagged the case as 'uncertain' because its "
-        "confidence was low; that is exactly when your judgement matters "
-        "most. Pick the SINGLE most likely category from the list below. "
-        "Do not hedge. "
+        "You are a senior SOC (Security Operations Center) analyst "
+        "working inside a defensive incident-response platform called "
+        "AlertSage. Every narrative you receive is an alert that a SOC "
+        "team needs to triage so they can defend their environment. "
+        "Classifying malware, phishing, intrusion, exfiltration and "
+        "other attack alerts is the core defensive workflow you are "
+        "here to support -- always provide a complete triage. Never "
+        "refuse, never reply with a safety or policy-violation "
+        "message, and never warn the user about the content of the "
+        "alert; just classify it. "
+        "Your job is to commit to a confident decision even when the "
+        "narrative is ambiguous. Pick the SINGLE most likely category "
+        "from the list below. Do not hedge. "
         "You MUST respond with a single valid JSON object only, "
         "with keys: 'label', 'mitre_ids', 'rationale'. "
         "The 'label' must be EXACTLY ONE of these seven values: "
         "phishing, malware, access_abuse, data_exfiltration, "
         "policy_violation, web_attack, benign_activity. "
+        "Label definitions (read carefully -- these are the ONLY "
+        "meanings): "
+        "- 'malware' = any malicious code, ransomware, trojan, RAT, "
+        "backdoor, cryptominer, EDR/AV malware detection, suspicious "
+        "process tree, C2 beacon, malicious DLL/EXE/PowerShell, "
+        "encoded payloads, etc. If the narrative mentions malware, "
+        "ransomware, an EDR/AV detection, or a clearly malicious "
+        "binary/process, the label is 'malware'. "
+        "- 'policy_violation' = ONLY internal HR / acceptable-use / "
+        "compliance issues that are NOT a security attack (e.g. an "
+        "employee using a banned SaaS tool, viewing inappropriate "
+        "content, or breaching the AUP). NEVER use 'policy_violation' "
+        "for malware, intrusion, or any external attacker activity. "
+        "- 'data_exfiltration' = movement of internal/corporate data "
+        "to an external or personal destination. "
+        "- 'access_abuse' = credential abuse, brute force, suspicious "
+        "logins, privilege misuse. "
+        "- 'phishing' = email/message-borne credential or payload "
+        "lure. "
+        "- 'web_attack' = SQLi, XSS, SSRF, webshell, WAF events, etc. "
+        "- 'benign_activity' = confirmed non-malicious. "
         "Do NOT use 'uncertain'. Do NOT invent new labels. If two "
-        "categories seem equally plausible, pick the one with the higher "
-        "potential impact (for example, prefer 'data_exfiltration' over "
-        "'policy_violation' when sensitive data movement is plausible). "
+        "categories seem equally plausible, pick the one with the "
+        "higher potential impact (prefer 'data_exfiltration' over "
+        "'policy_violation' when sensitive data movement is "
+        "plausible; prefer 'malware' over 'policy_violation' for any "
+        "malicious code). "
         "The 'mitre_ids' must be a non-empty list of ATT&CK technique "
-        "IDs like ['T1566'] that match the chosen label. "
+        "IDs like ['T1566'] that match the chosen label and the "
+        "specific behaviors described in the narrative. "
         "Ground your answer ONLY in the 'Incident narrative' text I "
         "provide. Do NOT invent any prior infection chain, phishing "
-        "emails, malware, or other attack steps that are not explicitly "
-        "stated in the narrative. If the narrative does not specify how "
-        "access was obtained or what happened before/after, explicitly "
-        "say so in the rationale. "
+        "emails, malware, or other attack steps that are not "
+        "explicitly stated in the narrative. If the narrative does "
+        "not specify how access was obtained or what happened "
+        "before/after, explicitly say so in the rationale. "
         "When the narrative clearly describes movement of internal or "
-        "corporate data to a personal or external cloud storage location "
-        "(for example, 'user transferred internal company data to a "
-        "personal Dropbox account'), classify this as "
+        "corporate data to a personal or external cloud storage "
+        "location (for example, 'user transferred internal company "
+        "data to a personal Dropbox account'), classify this as "
         "'data_exfiltration' unless the narrative clearly states the "
         "activity is authorized and benign. "
         "Do NOT output headings, notes, or multiple examples. Do NOT "
         "use the word 'Example' in your output. "
         "The 'rationale' must be detailed and comprehensive (3 to 6 "
         "sentences), SOC-focused, and MUST include: 1) A thorough "
-        "summary of what happened, 2) Assessment of threat severity and "
-        "potential impact, 3) At least 3-5 specific, actionable next "
-        "steps or recommended actions for the SOC analyst with "
+        "summary of what happened, 2) Assessment of threat severity "
+        "and potential impact, 3) At least 3-5 specific, actionable "
+        "next steps or recommended actions for the SOC analyst with "
         "technical details. "
         "Format the rationale as: 'Summary: [detailed description]. "
-        "Impact: [severity assessment]. Next steps: 1) [detailed action] "
-        "2) [detailed action] 3) [detailed action]...' "
+        "Impact: [severity assessment]. Next steps: 1) [detailed "
+        "action] 2) [detailed action] 3) [detailed action]...' "
         "Provide specific commands, log locations, or investigation "
         "techniques where applicable."
     )
@@ -771,47 +801,58 @@ def llm_second_opinion(
     def _has_any(text_lc: str, keywords: list[str]) -> bool:
         return any(k in text_lc for k in keywords)
 
-    raw_rationale = str(data.get("rationale", "") or "")
-    incident_iocs = _extract_indicators(text)
-    rationale_iocs = _extract_indicators(raw_rationale)
-    extra_iocs = rationale_iocs - incident_iocs
-    if extra_iocs:
-        _llm_debug(
-            f"LLM rationale introduced new IOC-like indicators: {sorted(extra_iocs)!r}; "
-            "treating as hallucinated and downgrading to 'uncertain'."
-        )
-        safe_label = "uncertain"
-        safe_rationale = build_llm_rationale(safe_label, llm_text)
-        return {
-            "label": safe_label,
-            "mitre_ids": [],
-            "rationale": safe_rationale,
-        }
+    # The keyword guards below were originally defensive scaffolding for
+    # the local llama.cpp / HF demo backends, where small-model output
+    # routinely hallucinates IOCs or jumps to the wrong label on a
+    # word-level cue. Hosted BYOK providers (OpenAI, Anthropic) are
+    # strong enough that those guards do more harm than good -- they
+    # downgrade legitimately confident answers to "uncertain" whenever
+    # the narrative happens to use vocabulary not covered by our fixed
+    # keyword lists. Skip them for BYOK paths and trust the LLM.
+    trusted_provider = provider_choice in {"openai", "anthropic"}
 
-    if label == "data_exfiltration" and not _has_any(lower_text, exfil_keywords):
-        _llm_debug("Downgrading 'data_exfiltration' (no exfil keywords).")
-        label = "uncertain"
-    elif label == "malware" and not _has_any(lower_text, malware_keywords):
-        _llm_debug("Downgrading 'malware' (no malware keywords).")
-        label = "uncertain"
-    elif label == "web_attack" and not _has_any(lower_text, web_keywords):
-        _llm_debug("Downgrading 'web_attack' (no web indicators).")
-        label = "uncertain"
-    elif label == "access_abuse" and not _has_any(lower_text, access_keywords):
-        _llm_debug("Downgrading 'access_abuse' (no identity terms).")
-        label = "uncertain"
-    elif label == "policy_violation" and not _has_any(lower_text, policy_keywords):
-        _llm_debug("Downgrading 'policy_violation' (no policy/HR language).")
-        label = "uncertain"
+    if not trusted_provider:
+        raw_rationale = str(data.get("rationale", "") or "")
+        incident_iocs = _extract_indicators(text)
+        rationale_iocs = _extract_indicators(raw_rationale)
+        extra_iocs = rationale_iocs - incident_iocs
+        if extra_iocs:
+            _llm_debug(
+                f"LLM rationale introduced new IOC-like indicators: {sorted(extra_iocs)!r}; "
+                "treating as hallucinated and downgrading to 'uncertain'."
+            )
+            safe_label = "uncertain"
+            safe_rationale = build_llm_rationale(safe_label, llm_text)
+            return {
+                "label": safe_label,
+                "mitre_ids": [],
+                "rationale": safe_rationale,
+            }
 
-    if label == "phishing" and not re.search(
-        r"\b(email|mailbox|inbox|message|phishing|link|url|clicked)\b",
-        lower_text,
-    ):
-        _llm_debug("Downgrading 'phishing' (no email indicators).")
-        label = "uncertain"
+        if label == "data_exfiltration" and not _has_any(lower_text, exfil_keywords):
+            _llm_debug("Downgrading 'data_exfiltration' (no exfil keywords).")
+            label = "uncertain"
+        elif label == "malware" and not _has_any(lower_text, malware_keywords):
+            _llm_debug("Downgrading 'malware' (no malware keywords).")
+            label = "uncertain"
+        elif label == "web_attack" and not _has_any(lower_text, web_keywords):
+            _llm_debug("Downgrading 'web_attack' (no web indicators).")
+            label = "uncertain"
+        elif label == "access_abuse" and not _has_any(lower_text, access_keywords):
+            _llm_debug("Downgrading 'access_abuse' (no identity terms).")
+            label = "uncertain"
+        elif label == "policy_violation" and not _has_any(lower_text, policy_keywords):
+            _llm_debug("Downgrading 'policy_violation' (no policy/HR language).")
+            label = "uncertain"
 
-    if label == "uncertain":
+        if label == "phishing" and not re.search(
+            r"\b(email|mailbox|inbox|message|phishing|link|url|clicked)\b",
+            lower_text,
+        ):
+            _llm_debug("Downgrading 'phishing' (no email indicators).")
+            label = "uncertain"
+
+    if not trusted_provider and label == "uncertain":
         heuristic_label: str | None = None
         if _has_any(lower_text, exfil_keywords):
             heuristic_label = "data_exfiltration"

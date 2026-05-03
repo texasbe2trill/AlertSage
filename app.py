@@ -32,6 +32,7 @@ import streamlit as st
 
 from src.triage.database import TriageDatabase
 from src.triage.embeddings import get_embedder
+from src.triage.llm_client import list_anthropic_models, list_openai_models
 from src.triage.llm_helpers import (
     MITRE_MAPPING,
     build_llm_rationale,
@@ -2728,19 +2729,15 @@ def view_investigate() -> None:
         result["llm_opinion"] = opinion
         result["llm_ms"] = opinion_ms
 
-        # When the fast classifier hedges to "uncertain" (confidence
-        # below threshold) but the LLM second opinion commits to a
-        # concrete label, promote the LLM verdict. The LLM is the
-        # smarter, slower model; the classifier is a first-pass filter.
-        # Without this promotion the result card still reads
-        # "Uncertain" with 0 MITRE techniques even when the LLM had a
-        # confident answer, which is a poor UX (and a bad demo look).
-        if (
-            opinion
-            and result.get("final_label") == "uncertain"
-            and opinion.get("label")
-            and opinion.get("label") != "uncertain"
-        ):
+        # When the LLM commits to a concrete label, let it drive the
+        # label, MITRE techniques and kill-chain enrichment. The LLM
+        # has the full narrative in front of it and is the smarter
+        # model; the TF-IDF classifier is a fast first-pass filter
+        # whose vocabulary is fixed at training time, so it routinely
+        # misroutes events that use slightly different wording. We
+        # only fall back to the classifier label when the LLM itself
+        # punted to "uncertain".
+        if opinion and opinion.get("label") and opinion.get("label") != "uncertain":
             result["final_label"] = opinion["label"]
             mitre_ids = opinion.get("mitre_ids") or []
             if mitre_ids:
@@ -3927,6 +3924,92 @@ def _settings_panel_huggingface() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _fetch_provider_models(
+    provider: str, api_key: str
+) -> tuple[list[str] | None, str | None]:
+    """Fetch the model list for a given provider, cached per session+key.
+
+    The cache is keyed on the API key so rotating keys forces a refresh.
+    Returns (model_ids, error_message). One of the two is always None.
+    """
+    cache = st.session_state.setdefault("_provider_model_cache", {})
+    cache_key = (provider, api_key)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        if provider == "anthropic":
+            models = list_anthropic_models(api_key)
+        elif provider == "openai":
+            models = list_openai_models(api_key)
+        else:
+            raise ValueError(f"Unknown provider for model fetch: {provider}")
+        result: tuple[list[str] | None, str | None] = (models, None)
+    except Exception as exc:
+        result = (None, str(exc))
+
+    cache[cache_key] = result
+    return result
+
+
+def _model_picker(
+    provider: str,
+    *,
+    api_key: str,
+    session_state_key: str,
+    settings_widget_key: str,
+    default_model: str,
+    text_placeholder: str,
+) -> None:
+    """Render the model id selector.
+
+    Auto-fetches the provider's model list when a key is present and
+    renders a selectbox; otherwise falls back to a manual text input.
+    """
+    if not api_key:
+        st.session_state[session_state_key] = st.text_input(
+            "Model id",
+            value=st.session_state.get(session_state_key, default_model),
+            help=f"Examples: {text_placeholder}. Add a key to auto-load available models.",
+            key=settings_widget_key,
+        )
+        return
+
+    refresh_key = f"{settings_widget_key}_refresh"
+    cols = st.columns([5, 1], gap="small")
+    with cols[1]:
+        st.markdown('<div style="height: 1.7rem;"></div>', unsafe_allow_html=True)
+        if st.button("Refresh", key=refresh_key, help="Refetch model list"):
+            cache = st.session_state.get("_provider_model_cache", {})
+            cache.pop((provider, api_key), None)
+
+    models, err = _fetch_provider_models(provider, api_key)
+    with cols[0]:
+        if err or not models:
+            st.session_state[session_state_key] = st.text_input(
+                "Model id",
+                value=st.session_state.get(session_state_key, default_model),
+                help=f"Could not auto-load models ({err or 'empty list'}). Enter manually.",
+                key=settings_widget_key,
+            )
+            return
+
+        current = st.session_state.get(session_state_key, default_model)
+        if current not in models:
+            models = [current, *models] if current else models
+        try:
+            idx = models.index(current)
+        except ValueError:
+            idx = 0
+        st.session_state[session_state_key] = st.selectbox(
+            "Model",
+            options=models,
+            index=idx,
+            help=f"Auto-loaded from {provider.title()} for the supplied key.",
+            key=settings_widget_key,
+        )
+
+
 def _settings_panel_openai() -> None:
     st.markdown(
         '<div class="soc-panel">'
@@ -3934,13 +4017,6 @@ def _settings_panel_openai() -> None:
         unsafe_allow_html=True,
     )
     cols = st.columns([3, 2], gap="medium")
-    with cols[0]:
-        st.session_state["openai_model_id"] = st.text_input(
-            "Model id",
-            value=st.session_state.get("openai_model_id", DEFAULT_OPENAI_MODEL),
-            help="Examples: gpt-4o-mini, gpt-4o, gpt-4.1-mini",
-            key="settings_oa_model",
-        )
     with cols[1]:
         st.session_state["openai_byo_key"] = st.checkbox(
             "Bring my own key",
@@ -3958,6 +4034,16 @@ def _settings_panel_openai() -> None:
             )
             if entered:
                 st.session_state["selected_openai_api_key"] = entered.strip()
+    with cols[0]:
+        _model_picker(
+            "openai",
+            api_key=st.session_state.get("selected_openai_api_key", "")
+            or _secret("OPENAI_API_KEY") or _env("OPENAI_API_KEY") or "",
+            session_state_key="openai_model_id",
+            settings_widget_key="settings_oa_model",
+            default_model=DEFAULT_OPENAI_MODEL,
+            text_placeholder="gpt-4o-mini, gpt-4o, gpt-4.1-mini",
+        )
     has_key = bool(st.session_state.get("selected_openai_api_key"))
     st.caption(
         "Key set for this session." if has_key
@@ -3973,13 +4059,6 @@ def _settings_panel_anthropic() -> None:
         unsafe_allow_html=True,
     )
     cols = st.columns([3, 2], gap="medium")
-    with cols[0]:
-        st.session_state["anthropic_model_id"] = st.text_input(
-            "Model id",
-            value=st.session_state.get("anthropic_model_id", DEFAULT_ANTHROPIC_MODEL),
-            help="Examples: claude-haiku-4-5, claude-sonnet-4-6",
-            key="settings_an_model",
-        )
     with cols[1]:
         st.session_state["anthropic_byo_key"] = st.checkbox(
             "Bring my own key",
@@ -3997,6 +4076,16 @@ def _settings_panel_anthropic() -> None:
             )
             if entered:
                 st.session_state["selected_anthropic_api_key"] = entered.strip()
+    with cols[0]:
+        _model_picker(
+            "anthropic",
+            api_key=st.session_state.get("selected_anthropic_api_key", "")
+            or _secret("ANTHROPIC_API_KEY") or _env("ANTHROPIC_API_KEY") or "",
+            session_state_key="anthropic_model_id",
+            settings_widget_key="settings_an_model",
+            default_model=DEFAULT_ANTHROPIC_MODEL,
+            text_placeholder="claude-haiku-4-5, claude-sonnet-4-6",
+        )
     has_key = bool(st.session_state.get("selected_anthropic_api_key"))
     st.caption(
         "Key set for this session." if has_key

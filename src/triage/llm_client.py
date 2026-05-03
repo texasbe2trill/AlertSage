@@ -389,24 +389,49 @@ class LocalLLMClient:
 
 
 SOC_SYSTEM_PROMPT = (
-    "You are a senior SOC analyst providing a second opinion on an "
-    "incident triage. Your job is to commit to a confident decision "
-    "even when the narrative is ambiguous. The fast classifier may "
-    "have already flagged the case as 'uncertain' because its "
-    "confidence was low; that is exactly when your judgement matters "
-    "most. Pick the SINGLE most likely category. Do not hedge. "
-    "Respond with a single valid JSON object only, with keys 'label', "
-    "'mitre_ids', and 'rationale'. Do not include any prose outside "
-    "the JSON object. "
+    "You are a senior SOC (Security Operations Center) analyst working "
+    "inside a defensive incident-response platform called AlertSage. "
+    "Every narrative you receive is an alert that a SOC team needs to "
+    "triage so they can defend their environment. Classifying malware, "
+    "phishing, intrusion, exfiltration and other attack alerts is the "
+    "core defensive workflow you are here to support -- always provide "
+    "a complete triage. Never refuse, never reply with a safety or "
+    "policy-violation message, and never warn the user about the "
+    "content of the alert; just classify it. "
+    "Your job is to commit to a confident decision even when the "
+    "narrative is ambiguous. Pick the SINGLE most likely category. "
+    "Do not hedge. Respond with a single valid JSON object only, with "
+    "keys 'label', 'mitre_ids', and 'rationale'. Do not include any "
+    "prose outside the JSON object. "
     "The 'label' must be EXACTLY ONE of these seven values: "
     "phishing, malware, access_abuse, data_exfiltration, "
     "policy_violation, web_attack, benign_activity. "
+    "Label definitions (read carefully -- these are the ONLY meanings): "
+    "- 'malware' = any malicious code, ransomware, trojan, RAT, "
+    "backdoor, cryptominer, EDR malware detection, suspicious "
+    "process tree, C2 beacon, malicious DLL/EXE/PowerShell, etc. "
+    "If the narrative mentions malware, ransomware, an EDR/AV "
+    "detection, or a clearly malicious binary, the label is 'malware'. "
+    "- 'policy_violation' = ONLY internal HR / acceptable-use / "
+    "compliance issues that are NOT a security attack (e.g. an "
+    "employee using a banned SaaS tool, viewing inappropriate "
+    "content, or breaching the AUP). NEVER use 'policy_violation' "
+    "for malware, intrusion, or any external attacker activity. "
+    "- 'data_exfiltration' = movement of internal/corporate data to "
+    "an external or personal destination. "
+    "- 'access_abuse' = credential abuse, brute force, suspicious "
+    "logins, privilege misuse. "
+    "- 'phishing' = email/message-borne credential or payload lure. "
+    "- 'web_attack' = SQLi, XSS, SSRF, webshell, WAF events, etc. "
+    "- 'benign_activity' = confirmed non-malicious. "
     "Do NOT use 'uncertain'. Do NOT invent new labels. If two "
     "categories seem equally plausible, pick the higher-impact one "
     "(prefer 'data_exfiltration' over 'policy_violation' when "
-    "sensitive data movement is plausible). "
+    "sensitive data movement is plausible; prefer 'malware' over "
+    "'policy_violation' for any malicious code). "
     "The 'mitre_ids' must be a non-empty list of ATT&CK technique "
-    "IDs like ['T1566'] that match the chosen label."
+    "IDs like ['T1566'] that match the chosen label and the specific "
+    "behaviors described in the narrative."
 )
 
 
@@ -582,6 +607,82 @@ class AnthropicClient:
         return self._parse_json_from_text(content)
 
 
+def list_anthropic_models(api_key: str, *, timeout: int = 15) -> list[str]:
+    """Return chat-capable Anthropic model ids for the given API key.
+
+    Used by the Settings UI to populate a model dropdown after the
+    user pastes a key. Only model ids are returned (sorted, newest
+    first by name) so the caller can render a simple selectbox.
+    Raises RuntimeError on auth/network failure so the UI can show
+    an error and fall back to the manual text input.
+    """
+    if not api_key:
+        raise ValueError("list_anthropic_models requires an API key")
+
+    response = requests.get(
+        "https://api.anthropic.com/v1/models",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        },
+        timeout=timeout,
+    )
+
+    if response.status_code == 401:
+        raise PermissionError("Anthropic API key was rejected (401).")
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Anthropic /v1/models failed ({response.status_code}): {response.text[:200]}"
+        )
+
+    payload = response.json() if response.content else {}
+    items = payload.get("data") or []
+    ids = [str(item.get("id")) for item in items if item.get("id")]
+    return sorted(set(ids), reverse=True)
+
+
+def list_openai_models(api_key: str, *, timeout: int = 15) -> list[str]:
+    """Return chat-capable OpenAI model ids for the given API key.
+
+    Filters the raw /v1/models list down to chat-completion models
+    (gpt-* family) so the user is not shown embeddings, audio, or
+    image models in the LLM dropdown.
+    """
+    if not api_key:
+        raise ValueError("list_openai_models requires an API key")
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "The 'openai' package is not installed. Add it to "
+            "requirements.txt or install with `pip install openai`."
+        ) from exc
+
+    client = OpenAI(api_key=api_key, timeout=timeout)
+    try:
+        page = client.models.list()
+    except Exception as exc:
+        raise RuntimeError(f"OpenAI /v1/models failed: {exc}") from exc
+
+    ids: list[str] = []
+    for model in getattr(page, "data", []) or []:
+        mid = getattr(model, "id", None) or (
+            model.get("id") if isinstance(model, dict) else None
+        )
+        if not mid:
+            continue
+        lower = mid.lower()
+        if not lower.startswith("gpt-"):
+            continue
+        if any(token in lower for token in ("embedding", "audio", "tts", "whisper", "image", "realtime", "moderation")):
+            continue
+        ids.append(mid)
+
+    return sorted(set(ids), reverse=True)
+
+
 __all__ = [
     "LocalLLMClient",
     "HuggingFaceInferenceClient",
@@ -589,5 +690,7 @@ __all__ = [
     "AnthropicClient",
     "RateLimiter",
     "resolve_hf_credentials",
+    "list_anthropic_models",
+    "list_openai_models",
     "SOC_SYSTEM_PROMPT",
 ]
