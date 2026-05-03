@@ -4,7 +4,9 @@
 
 # AlertSage
 
-### Free-text security incidents in. MITRE-mapped triage cards out. Seconds, not minutes.
+### Open-source SOC console — free-text incident in, MITRE ATT&CK triage card out.
+
+Hybrid TF-IDF + sentence-transformer classifier · multi-provider LLM dispatcher · IOC enrichment · batch processing · case management.
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.39%2B-FF4B4B.svg?logo=streamlit&logoColor=white)](https://streamlit.io/)
@@ -24,16 +26,19 @@
 
 ## What it is
 
-AlertSage is an open-source SOC console that classifies a free-text security incident, maps it to MITRE ATT&CK, extracts indicators, and writes an analyst-ready rationale in about 30 seconds.
-
-A TF-IDF + sentence-transformer hybrid handles the fast first pass. An LLM (your pick: OpenAI, Anthropic, Hugging Face Inference Router, or local `llama.cpp`) commits to the verdict and writes the rationale. SQLite holds history, bookmarks, notes, case status, and timelines.
+AlertSage is an open-source SOC console. Paste a free-text security incident; get back a MITRE ATT&CK-mapped triage card with severity, kill chain, IOCs, and an analyst-ready rationale in about 30 seconds.
 
 ```
 free text  ->  hybrid classifier  ->  LLM second opinion  ->  triage card
               ~1.4s                   ~5s                     instant
 ```
 
-API keys live in `st.session_state` only. They are never written to disk, never logged, and never echoed in error messages.
+- **Hybrid classifier** — TF-IDF + sentence-transformer first pass (~1.4s); an LLM commits the verdict and writes the rationale
+- **Multi-provider LLM dispatcher** — OpenAI, Anthropic, Hugging Face Inference Router, or local `llama.cpp`; falls back through the chain when a key is missing, with per-provider rate limiting
+- **IOC enrichment** — auto-extracted indicators with VirusTotal / AbuseIPDB / Shodan / GreyNoise pivots
+- **Batch processing** — CSV up to 500 rows, per-row triage plus tactic-level MITRE coverage and executive rollup exports
+- **Case management** — SQLite-backed history, bookmarks, analyst notes, a four-stage case workflow (New / Triaging / Contained / Closed), and per-case timelines
+- **BYOK, no leaks** — API keys live in `st.session_state` only; never written to disk, never logged, never echoed in error messages
 
 ---
 
